@@ -64,3 +64,8 @@ make
 
 ### GitHub Actions
 Every push automatically builds the payload via [`.github/workflows/build.yml`](.github/workflows/build.yml) and publishes the `.elf` to **Releases**.
+
+## Credits
+
+* **[armanate](https://github.com/armanate/rdr2-60fps-runtime-patcher)** — runtime payload architecture, process/context verification, and DMAP page-table write logic.
+* **a_Criminai** — additional `fwTimer` / region offsets referenced from the XML patch.
