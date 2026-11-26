@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.10"
+#define TOOL_VERSION "1.11"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -65,8 +65,8 @@ static const char *const WANT_TITLE_IDS[] = {
 #define MAX_RES_PCT     100u
 
 /* Runtime RT Reflections toggle (sr_tracing + sr_denoising):
- * 1 = stock (ON), 0 = OFF via runtime flag 0xb3f3e90 (buffers stay allocated). */
-#define DEFAULT_RT_REFL 1u
+ * 0 = OFF via runtime flag 0xb3f3e90 (default, buffers stay allocated), 1 = stock (ON). */
+#define DEFAULT_RT_REFL 0u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -710,11 +710,11 @@ int main(void) {
     rt_refl_site.patch[5] = 0x90;
 
     if (g_res_pct > 0)
-        notify("ready (FPS: %u, Res: %u%%%s). Start GTAVI within 10 min.",
-               g_target_fps, g_res_pct, g_rt_refl ? "" : ", RT Refl: OFF");
+        notify("ready (Res %u%%%s). Start GTAVI within 10 min.",
+               g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
     else
-        notify("ready (FPS: %u, Res: stock%s). Start GTAVI within 10 min.",
-               g_target_fps, g_rt_refl ? "" : ", RT Refl: OFF");
+        notify("ready (Res stock%s). Start GTAVI within 10 min.",
+               g_rt_refl ? "" : ", RT Refl OFF");
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -819,14 +819,14 @@ int main(void) {
 
     if (already1 && already2 && (!g_res_pct || taa2u_alr) &&
         (g_rt_refl || rt_refl_alr)) {
-        notify("already active for this session (FPS: %u, Res: %u%%%s).",
-               g_target_fps, g_res_pct, rt_refl_alr ? ", RT Refl: OFF" : "");
+        notify("already active (Res %u%%%s).",
+               g_res_pct, rt_refl_alr ? ", RT Refl OFF" : "");
     } else if (taa2u_applied) {
-        notify("FPS unlocked (%u) + TAA2U Res %u%%%s ON! Enjoy.",
-               g_target_fps, g_res_pct, rt_refl_applied ? " + RT Refl OFF" : "");
+        notify("FPS Unlocked, Res %u%%%s",
+               g_res_pct, rt_refl_applied ? ", RT Refl OFF" : "");
     } else {
-        notify("FPS unlocked (target %u FPS%s). Enjoy.",
-               g_target_fps, rt_refl_applied ? ", RT Refl OFF" : "");
+        notify("FPS Unlocked%s",
+               rt_refl_applied ? ", RT Refl OFF" : "");
     }
 
     return finish(EXIT_OK);
