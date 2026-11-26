@@ -1,6 +1,6 @@
 # GTAVI Unlock FPS Runtime Patcher (PS5)
 
-A lightweight, one-shot `.elf` runtime payload for jailbroken **PlayStation 5** consoles that unlocks the 30 FPS cap and optionally lowers the internal render resolution scale in *Grand Theft Auto VI* directly in memory—without modifying any game files on disk.
+A lightweight, one-shot `.elf` runtime payload for jailbroken **PlayStation 5** consoles that unlocks the 30 FPS cap and lets you customize the internal `TAA2U` render resolution scale in *Grand Theft Auto VI* directly in memory—without modifying any game files on disk.
 
 ## Requirements
 
@@ -13,9 +13,9 @@ Grab the latest prebuilt `.elf` directly from [**Releases**](https://github.com/
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.1.elf` through your Payload Manager (PLDMGR / `elfldr`).
+1. Load `GTAVI UnlockFPS_v1.2.elf` through your Payload Manager (PLDMGR / `elfldr`).
 2. A PS5 notification will appear confirming the payload is ready and **waiting up to 10 minutes** for `PPSA38500` to launch.
-3. Start GTAVI *(for Resolution Scale to take effect, load the payload **before** starting the game; FPS unlock alone also works if the game is already running)*.
+3. Start GTAVI *(load the payload **before** starting the game so the resolution scale applies before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and exits automatically.
 
 ## How It Works
@@ -23,7 +23,7 @@ Grab the latest prebuilt `.elf` directly from [**Releases**](https://github.com/
 * Watches running `eboot.bin` processes strictly for `PPSA38500` without touching memory of system apps or other titles.
 * Resolves the game's ASLR base address and checks **64 bytes of surrounding context** at every patch site before writing.
 * **FPS Unlock:** Patches both target FPS writer sites (`0x3f73e51`, `0x40d2be1`) and updates the live `g_TargetFrameTimeUs` (`0xe3be220`) and `g_RequestedFrameLock` (`0xe7bbb08`) globals.
-* **Resolution Scale:** When `scale > 0`, patches both render-scale index sites (`0x3a2baa0`, `0x3f73e2c`) to use the engine's built-in RAGE ratio table before `TAA2U` upscaling—freeing GPU load and SmartShift power budget for higher framerates (ideal for hitting the 48–60 Hz VRR window).
+* **TAA2U Render Resolution Scale:** On base PS5, GTAVI hardcodes its `TAA2U` internal render scale to `0.6667` (`2560×1440` upscaled to 4K) inside `TAA2U::Update()` (`0x62eadc0`). Patching this function lets you lower the internal resolution (e.g. `50%` = `1920×1080` → upscaled to 4K via `TAA2U`) to free GPU load and SmartShift power budget for higher framerates (ideal for the 48–60 Hz VRR window).
 * Uses kernel DMAP page-table writes on FW >= 8.40, or `mdbg_copyin` on older firmwares.
 
 ## Configuration
@@ -32,17 +32,17 @@ On first run, the payload creates `/data/gtavi-unlockfps/fps.txt`:
 
 ```ini
 fps=60
-scale=2
+res_pct=50
 ```
 
 Edit over FTP without rebuilding:
 * **`fps`**: target FPS cap (`30`–`120`, default `60`).
-* **`scale`**: internal render resolution scale (`0`–`10`, default `2`):
-  * `0` = stock (unchanged)
-  * `1` = `1/2` (50% — e.g. 1080p internal on 4K)
-  * `2` = `2/3` (67% — e.g. 1440p internal on 4K)
-  * `3` = `3/4` (75% — e.g. 1620p internal on 4K)
-  * `4` = `4/5` (80%), `5` = `5/6` (83%), `6` = `7/8`, `7` = `9/10`, `8` = `11/12`, `9` = `14/15`, `10` = `29/30`
+* **`res_pct`**: internal `TAA2U` render resolution as a percentage of 4K output (`0` = stock `67%` / `1440p`, or `25`–`100`):
+  * `67` = stock (`2560×1440`)
+  * `50` = **`1920×1080`** *(default — ~44% fewer pixels than stock)*
+  * `45` = `1728×972`
+  * `40` = `1536×864`
+  * `33` = `1280×720`
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
@@ -53,7 +53,7 @@ Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.1.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.2.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh
