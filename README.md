@@ -46,6 +46,21 @@ Edit over FTP without rebuilding:
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
+## Offsets (`v01.002.001`)
+
+RVAs relative to `eboot.bin` map base (with `+0x400000` static base addresses in parentheses):
+
+* **`0x03f73e51`** (`0x04373e51`) — Target FPS cap writer #1 (`b8 <fps_u32> 90`)
+* **`0x040d2be1`** (`0x044d2be1`) — Target FPS cap writer #2 (`b8 <fps_u32> 66 90`)
+* **`0x03f73ecd`** (`0x04373ecd`) — `fwTimer` delta-time floor divisor writer #1 (`b8 b8 0b 00 00 90` → `3000`)
+* **`0x041ec831`** (`0x045ec831`) — `fwTimer` delta-time floor writer #2 (`9090909090909090`)
+* **`0x062eadc0`** (`0x066eadc0`) — `TAA2U::Update()` internal render scale function (18 bytes)
+* **`0x0149dd26`** (`0x0189dd26`) — RT Reflections per-frame runtime flag writer (`31c090909090`, only when `rt_reflections=0`)
+* **`0x0abab49c`** (`0x0afab49c`) — RAM `g_MinFrameSec` (`3ec3ae39` = `1/3000s`)
+* **`0x0abab4a0`** (`0x0afab4a0`) — RAM `g_TargetFrameSec` (`3ec3ae39` = `1/3000s`)
+* **`0x0e3be220`** (`0x0e7be220`) — RAM `g_TargetFrameTimeUs` (`1000000 / fps`)
+* **`0x0e7bbb08`** (`0x0ebbbb08`) — RAM `g_RequestedFrameLock` (`ff`)
+
 ## Building from Source
 
 ### Docker (macOS / Linux / Windows)
