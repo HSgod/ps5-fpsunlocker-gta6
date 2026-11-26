@@ -39,7 +39,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.3"
+#define TOOL_VERSION "1.4"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -55,17 +55,28 @@
 
 /* Internal TAA2U render resolution percentage of output (stock PS5 = 67% / 1440p).
  * 0 = stock (untouched), 25..100 = custom percent (e.g. 50 = 1080p on 4K). */
-#define DEFAULT_RES_PCT 50u
-#define MIN_RES_PCT     25u
-#define MAX_RES_PCT     100u
+#define DEFAULT_RES_PCT   50u
+#define MIN_RES_PCT       25u
+#define MAX_RES_PCT       100u
+#define DEFAULT_PERF_MODE 1u /* 1 = Low shadows/volumetrics/LOD/foliage in ApplySettings */
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
-#define SITE1_RVA    0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
-#define SITE1_LEN    6u
-#define SITE2_RVA    0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
-#define SITE2_LEN    7u
-#define TIMESTEP_RVA 0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
-#define TIMESTEP_LEN 6u
+#define SITE1_RVA       0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
+#define SITE1_LEN       6u
+#define SITE2_RVA       0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
+#define SITE2_LEN       7u
+#define TIMESTEP_RVA    0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
+#define TIMESTEP_LEN    6u
+
+/* ApplySettings engine-native Low quality overrides (perf_mode=1): */
+#define SHADOW_QUAL_RVA 0x3f7431eu /* mov edi, [rbx + 0xc94]            (6 bytes)  */
+#define SHADOW_QUAL_LEN 6u
+#define VOL_SAMPLES_RVA 0x3f74350u /* mov eax, [rax + 0x568]            (6 bytes)  */
+#define VOL_SAMPLES_LEN 6u
+#define LOD_DIST_RVA    0x3f74389u /* vmovss xmm0, [rbx + 0xdd8]        (8 bytes)  */
+#define LOD_DIST_LEN    8u
+#define FOLIAGE_BUD_RVA 0x3f74467u /* mov edx, [rbx + 0xc74]            (6 bytes)  */
+#define FOLIAGE_BUD_LEN 6u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -104,6 +115,32 @@ static const uint8_t TIMESTEP_CTX[64] = {
     0x50,0x4c,0x39,0xf9,0x0f,0x85,0x70,0x08,0x00,0x00,0x48,0x05,0x08,0x08,0x00,0x00,
     0x8b,0x80,0x14,0x06,0x00,0x00,0xc4,0xe1,0xda,0x2a,0xc0,0xc5,0xfa,0x10,0x0d,0xfc,
     0x63,0xd0,0x05,0x31,0xc9,0xba,0x80,0x00,0x00,0x00,0xc5,0xf2,0x5e,0xc0,0xc5,0xfa
+};
+
+/* 64 bytes of the clean GTAVI eboot around ApplySettings perf_mode sites: */
+static const uint8_t SHADOW_QUAL_CTX[64] = {
+    0x0d,0xc6,0xf3,0xf8,0x07,0x8a,0x02,0x88,0x05,0x03,0x59,0x9a,0x06,0x48,0x8d,0x05,
+    0xa7,0xf3,0xf8,0x07,0x48,0x0f,0x44,0xc8,0x8a,0x01,0x88,0x05,0xce,0xf2,0xf8,0x07,
+    0x8b,0xbb,0x94,0x0c,0x00,0x00,0x8b,0xb3,0xcc,0x0c,0x00,0x00,0xe8,0x21,0x4a,0x57,
+    0x02,0x48,0x8b,0x05,0xda,0xb1,0x7f,0x0a,0x48,0x8b,0x40,0x08,0x48,0x8b,0x08,0x48
+};
+static const uint8_t VOL_SAMPLES_CTX[64] = {
+    0x8b,0x05,0xda,0xb1,0x7f,0x0a,0x48,0x8b,0x40,0x08,0x48,0x8b,0x08,0x48,0x8b,0x49,
+    0x50,0x4c,0x39,0xf9,0x0f,0x85,0xce,0x03,0x00,0x00,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8b,0x80,0x68,0x05,0x00,0x00,0x85,0xc0,0x7e,0x18,0x31,0xc9,0x83,0xf8,0x02,0x0f,
+    0x95,0xc1,0x83,0xc1,0x0b,0x83,0xf8,0x01,0xb8,0x07,0x00,0x00,0x00,0x0f,0x45,0xc1
+};
+static const uint8_t LOD_DIST_CTX[64] = {
+    0x07,0x00,0x00,0x00,0x0f,0x45,0xc1,0xeb,0x05,0xb8,0x02,0x00,0x00,0x00,0x89,0x05,
+    0x97,0x29,0xf1,0x07,0xc5,0xfa,0x10,0x0d,0x57,0x5f,0xd0,0x05,0xc5,0xe8,0x57,0xd2,
+    0xc5,0xfa,0x10,0x83,0xd8,0x0d,0x00,0x00,0xc5,0xf2,0x5d,0xc8,0xc5,0xfa,0xc2,0xc2,
+    0x01,0xc5,0xfa,0x10,0x15,0xaa,0x33,0xf1,0x07,0xc5,0xf8,0x55,0xc1,0xc5,0xfa,0x10
+};
+static const uint8_t FOLIAGE_BUD_CTX[64] = {
+    0x07,0xc6,0x05,0x00,0x29,0xf1,0x07,0x01,0x8b,0x83,0xbc,0x0c,0x00,0x00,0x89,0x05,
+    0xb9,0x54,0x9a,0x06,0x8b,0x83,0x80,0x0d,0x00,0x00,0x89,0x05,0xc5,0x02,0xf1,0x07,
+    0x8b,0x93,0x74,0x0c,0x00,0x00,0x8b,0x83,0xe4,0x0c,0x00,0x00,0x8d,0x4a,0xff,0x83,
+    0xf9,0x03,0x73,0x46,0x89,0xca,0x4c,0x8d,0x05,0x34,0x1f,0xf3,0x05,0x48,0x8d,0x35
 };
 
 /* 64 bytes of the clean GTAVI eboot around TAA2U::Update (site at +32, len 18): */
@@ -157,6 +194,7 @@ static FILE *g_log;
 static struct timespec g_t0;
 static uint32_t g_target_fps = DEFAULT_FPS;
 static uint32_t g_res_pct = DEFAULT_RES_PCT;
+static uint32_t g_perf_mode = DEFAULT_PERF_MODE;
 
 static unsigned long elapsed_ms(void) {
     struct timespec t;
@@ -234,6 +272,7 @@ static int lock_instance(void) {
 static void load_settings(void) {
     char line[128];
     int saw_res_pct = 0;
+    int saw_perf_mode = 0;
     FILE *f = fopen(CONF_PATH, "r");
     if (!f) {
         f = fopen(CONF_PATH, "w");
@@ -242,8 +281,10 @@ static void load_settings(void) {
                        "# fps: target FPS cap (30..120). Default: 60.\n"
                        "# res_pct: TAA2U internal render resolution %% of 4K output (stock PS5 = 67%% / 1440p):\n"
                        "#   0 = stock, 50 = 1080p, 45 = 972p, 40 = 864p, 33 = 720p (range 25..100)\n"
+                       "# perf_mode: 1 = Low shadows/volumetrics/LOD/foliage presets for extra FPS, 0 = stock\n"
                        "fps=%u\n"
-                       "res_pct=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT);
+                       "res_pct=%u\n"
+                       "perf_mode=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_PERF_MODE);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -269,17 +310,23 @@ static void load_settings(void) {
                 logmsg("WARN", "ignoring res_pct=%d (must be 0 or %u..%u)",
                        v, MIN_RES_PCT, MAX_RES_PCT);
             }
+        } else if (!strncmp(line, "perf_mode", 9)) {
+            saw_perf_mode = 1;
+            g_perf_mode = (v != 0) ? 1u : 0u;
         }
     }
     fclose(f);
 
-    if (!saw_res_pct) {
+    if (!saw_res_pct || !saw_perf_mode) {
         f = fopen(CONF_PATH, "a");
         if (f) {
-            fprintf(f, "# res_pct: TAA2U internal resolution %% (stock=67%%, 50=1080p, 40=864p, 0=stock)\n"
-                       "res_pct=%u\n", DEFAULT_RES_PCT);
+            if (!saw_res_pct)
+                fprintf(f, "# res_pct: TAA2U internal resolution %% (stock=67%%, 50=1080p, 40=864p, 0=stock)\n"
+                           "res_pct=%u\n", DEFAULT_RES_PCT);
+            if (!saw_perf_mode)
+                fprintf(f, "# perf_mode: 1 = Low shadows/volumetrics/LOD/foliage presets, 0 = stock\n"
+                           "perf_mode=%u\n", DEFAULT_PERF_MODE);
             fclose(f);
-            logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
         }
     }
 }
@@ -544,6 +591,7 @@ int main(void) {
     struct patch_site fps_sites[2];
     struct patch_site timestep_site;
     struct patch_site taa2u_site;
+    struct patch_site perf_sites[4];
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
     unsigned skipped_n = 0, proc_n = 0, i;
@@ -552,7 +600,7 @@ int main(void) {
     char titleid[16] = "?";
     unsigned poll, fails = 0;
     int already_open = 0, already1 = 0, already2 = 0, already_ts = 0;
-    int taa2u_applied = 0, taa2u_alr = 0;
+    int taa2u_applied = 0, taa2u_alr = 0, perf_applied = 0;
     unsigned long found_ms;
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
@@ -627,12 +675,49 @@ int main(void) {
         memcpy(taa2u_site.patch + 5, store_ret, sizeof(store_ret));
     }
 
+    /* Build ApplySettings engine-native Low presets (perf_mode=1):
+     *   0: SHADOW_QUAL (6B): xor edi, edi; nop*4       (Low shadows, 0.5x dist)
+     *   1: VOL_SAMPLES (6B): xor eax, eax; nop*4       (2 samples instead of 7..12)
+     *   2: LOD_DIST    (8B): vxorps xmm0,xmm0,xmm0; nop*4 (min LOD/draw distance)
+     *   3: FOLIAGE_BUD (6B): xor edx, edx; nop*4       (min foliage/instance budget) */
+    memset(perf_sites, 0, sizeof(perf_sites));
+    {
+        static const uint8_t p_edi0[6]  = {0x31,0xff,0x90,0x90,0x90,0x90};
+        static const uint8_t p_eax0[6]  = {0x31,0xc0,0x90,0x90,0x90,0x90};
+        static const uint8_t p_xmm0[8]  = {0xc5,0xf8,0x57,0xc0,0x90,0x90,0x90,0x90};
+        static const uint8_t p_edx0[6]  = {0x31,0xd2,0x90,0x90,0x90,0x90};
+
+        perf_sites[0].name = "shadow_qual";
+        perf_sites[0].rva = SHADOW_QUAL_RVA;
+        perf_sites[0].len = SHADOW_QUAL_LEN;
+        perf_sites[0].ctx = SHADOW_QUAL_CTX;
+        memcpy(perf_sites[0].patch, p_edi0, 6);
+
+        perf_sites[1].name = "vol_samples";
+        perf_sites[1].rva = VOL_SAMPLES_RVA;
+        perf_sites[1].len = VOL_SAMPLES_LEN;
+        perf_sites[1].ctx = VOL_SAMPLES_CTX;
+        memcpy(perf_sites[1].patch, p_eax0, 6);
+
+        perf_sites[2].name = "lod_dist";
+        perf_sites[2].rva = LOD_DIST_RVA;
+        perf_sites[2].len = LOD_DIST_LEN;
+        perf_sites[2].ctx = LOD_DIST_CTX;
+        memcpy(perf_sites[2].patch, p_xmm0, 8);
+
+        perf_sites[3].name = "foliage_bud";
+        perf_sites[3].rva = FOLIAGE_BUD_RVA;
+        perf_sites[3].len = FOLIAGE_BUD_LEN;
+        perf_sites[3].ctx = FOLIAGE_BUD_CTX;
+        memcpy(perf_sites[3].patch, p_edx0, 6);
+    }
+
     if (g_res_pct > 0)
-        notify("ready (FPS: %u, Res: %u%%). Start GTAVI (%s) within 10 min.",
-               g_target_fps, g_res_pct, WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: %u%%, Perf: %s). Start GTAVI (%s) within 10 min.",
+               g_target_fps, g_res_pct, g_perf_mode ? "ON" : "OFF", WANT_TITLE_ID);
     else
-        notify("ready (FPS: %u, Res: stock). Start GTAVI (%s) within 10 min.",
-               g_target_fps, WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: stock, Perf: %s). Start GTAVI (%s) within 10 min.",
+               g_target_fps, g_perf_mode ? "ON" : "OFF", WANT_TITLE_ID);
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -715,17 +800,31 @@ int main(void) {
         logmsg("WARN", "fwTimer floor context mismatch");
     }
 
+    if (g_perf_mode) {
+        for (i = 0; i < 4; i++) {
+            int alr = 0;
+            if (verify_site(pid, base, &perf_sites[i]) == 1) {
+                if (!apply_site(pid, base, &perf_sites[i], &alr))
+                    perf_applied++;
+            } else {
+                logmsg("WARN", "%s context mismatch, skipping", perf_sites[i].name);
+            }
+        }
+    }
+
     update_live_globals(pid, base);
-    logmsg("OK", "all patches applied in %lu ms", elapsed_ms() - found_ms);
+    logmsg("OK", "all patches applied in %lu ms (perf=%d/4)",
+           elapsed_ms() - found_ms, perf_applied);
 
     if (already1 && already2 && (!g_res_pct || taa2u_alr)) {
-        notify("already active for this session (FPS: %u, Res: %u%%).",
-               g_target_fps, g_res_pct);
+        notify("already active for this session (FPS: %u, Res: %u%%, Perf: %s).",
+               g_target_fps, g_res_pct, g_perf_mode ? "ON" : "OFF");
     } else if (taa2u_applied) {
-        notify("FPS unlocked (%u) + TAA2U Res %u%% ON! Enjoy.",
-               g_target_fps, g_res_pct);
+        notify("FPS unlocked (%u) + Res %u%% + Perf %d/4 ON! Enjoy.",
+               g_target_fps, g_res_pct, perf_applied);
     } else {
-        notify("FPS unlocked (target %u FPS). Enjoy.", g_target_fps);
+        notify("FPS unlocked (%u) + Perf %d/4 ON! Enjoy.",
+               g_target_fps, perf_applied);
     }
 
     return finish(EXIT_OK);
