@@ -39,7 +39,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.2"
+#define TOOL_VERSION "1.3"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -60,10 +60,12 @@
 #define MAX_RES_PCT     100u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
-#define SITE1_RVA 0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
-#define SITE1_LEN 6u
-#define SITE2_RVA 0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
-#define SITE2_LEN 7u
+#define SITE1_RVA    0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
+#define SITE1_LEN    6u
+#define SITE2_RVA    0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
+#define SITE2_LEN    7u
+#define TIMESTEP_RVA 0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
+#define TIMESTEP_LEN 6u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -72,9 +74,11 @@
 #define TAA2U_RVA 0x62eadc0u
 #define TAA2U_LEN 18u
 
-/* Live globals updated by Site 1 & Site 2 and polled by SetFlipRate: */
+/* Live globals updated by Site 1 & Site 2 and polled by SetFlipRate & fwTimer: */
 #define G_TARGET_FRAMETIME_US_RVA 0xe3be220u /* uint32_t: 1000000 / fps */
 #define G_REQUESTED_FRAMELOCK_RVA 0xe7bbb08u /* uint8_t:  0xff = auto   */
+#define G_MIN_FRAME_SEC_RVA       0xabab49cu /* float: fwTimer min dt   */
+#define G_TARGET_FRAME_SEC_RVA    0xabab4a0u /* float: fwTimer floor dt */
 
 #define CTX_OFF 32u
 
@@ -92,6 +96,14 @@ static const uint8_t SITE2_CTX[64] = {
     0x10,0x0d,0x95,0x9b,0xba,0x05,0xba,0xe8,0x03,0x00,0x00,0xb9,0xe8,0x03,0x00,0x00,
     0x41,0x8b,0x86,0x04,0x02,0x00,0x00,0x3d,0xe8,0x03,0x00,0x00,0x0f,0x42,0xd0,0x85,
     0xc0,0x0f,0x44,0xd1,0xc5,0xea,0x2a,0xc2,0xc5,0xf2,0x5e,0xc0,0xc4,0xe1,0xfa,0x2c
+};
+
+/* 64 bytes of the clean GTAVI eboot around TIMESTEP writer (site at +32, len 6): */
+static const uint8_t TIMESTEP_CTX[64] = {
+    0x8b,0x05,0x5d,0xb6,0x7f,0x0a,0x48,0x8b,0x40,0x08,0x48,0x8b,0x08,0x48,0x8b,0x49,
+    0x50,0x4c,0x39,0xf9,0x0f,0x85,0x70,0x08,0x00,0x00,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8b,0x80,0x14,0x06,0x00,0x00,0xc4,0xe1,0xda,0x2a,0xc0,0xc5,0xfa,0x10,0x0d,0xfc,
+    0x63,0xd0,0x05,0x31,0xc9,0xba,0x80,0x00,0x00,0x00,0xc5,0xf2,0x5e,0xc0,0xc5,0xfa
 };
 
 /* 64 bytes of the clean GTAVI eboot around TAA2U::Update (site at +32, len 18): */
@@ -471,13 +483,24 @@ static int apply_site(uint32_t pid, uint64_t base, const struct patch_site *s,
     return -1;
 }
 
-/* Also update live RAM globals so the FPS unlock takes effect even if GTAVI
- * was already running before the payload was launched. */
+/* Update live RAM globals so both the FPS unlock and normal 1.0x game speed
+ * (fwTimer min delta-time floor) take effect immediately, even mid-session. */
 static void update_live_globals(uint32_t pid, uint64_t base) {
     uint32_t cur_us = 0;
     uint32_t want_us = 1000000u / g_target_fps;
     uint8_t auto_lock = 0xffu;
     uint8_t buf[4];
+    uint8_t floor_buf[4];
+
+    /* Lower fwTimer's min delta-time floor from 1/30s (0.0333s) to 1ms (0.001s)
+     * so framerates above 30 FPS run at exact 1.0x real-time speed. */
+    put32le(floor_buf, float_bits(0.001f));
+    if (!proc_write(pid, base + G_MIN_FRAME_SEC_RVA, floor_buf, 4) &&
+        !proc_write(pid, base + G_TARGET_FRAME_SEC_RVA, floor_buf, 4)) {
+        logmsg("OK", "updated fwTimer min/target frame floor to 0.001s (1.0x speed)");
+    } else {
+        logmsg("WARN", "could not update fwTimer floor globals");
+    }
 
     if (proc_read(pid, base + G_TARGET_FRAMETIME_US_RVA, buf, 4))
         return;
@@ -519,6 +542,7 @@ static int finish(int code) {
 
 int main(void) {
     struct patch_site fps_sites[2];
+    struct patch_site timestep_site;
     struct patch_site taa2u_site;
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
@@ -527,7 +551,7 @@ int main(void) {
     uint64_t base = 0;
     char titleid[16] = "?";
     unsigned poll, fails = 0;
-    int already_open = 0, already1 = 0, already2 = 0;
+    int already_open = 0, already1 = 0, already2 = 0, already_ts = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
     unsigned long found_ms;
 
@@ -569,6 +593,17 @@ int main(void) {
     put32le(fps_sites[1].patch + 1, g_target_fps);
     fps_sites[1].patch[5] = 0x66;
     fps_sites[1].patch[6] = 0x90;
+
+    /* Build fwTimer floor patch (prevents game speed-up above 30 FPS):
+     *   0x3f73ecd (6B): mov eax, 1000; nop -> sets 1.0f/1000.0f = 1ms floor */
+    memset(&timestep_site, 0, sizeof(timestep_site));
+    timestep_site.name = "fwtimer_floor";
+    timestep_site.rva = TIMESTEP_RVA;
+    timestep_site.len = TIMESTEP_LEN;
+    timestep_site.ctx = TIMESTEP_CTX;
+    timestep_site.patch[0] = 0xb8;
+    put32le(timestep_site.patch + 1, 1000u);
+    timestep_site.patch[5] = 0x90;
 
     /* Build TAA2U::Update() 18-byte replacement:
      *   b8 <float32>         mov eax, <res_pct / 100.0f>
@@ -671,6 +706,13 @@ int main(void) {
         apply_site(pid, base, &fps_sites[1], &already2)) {
         notify("write failed. Restart GTAVI and check %s", LOG_PATH);
         return finish(EXIT_WRITE_FAIL);
+    }
+
+    if (verify_site(pid, base, &timestep_site) == 1) {
+        if (apply_site(pid, base, &timestep_site, &already_ts))
+            logmsg("WARN", "fwTimer floor code patch failed; relying on RAM write");
+    } else {
+        logmsg("WARN", "fwTimer floor context mismatch");
     }
 
     update_live_globals(pid, base);
