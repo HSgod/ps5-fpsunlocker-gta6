@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.9"
+#define TOOL_VERSION "1.10"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -64,6 +64,10 @@ static const char *const WANT_TITLE_IDS[] = {
 #define MIN_RES_PCT     50u
 #define MAX_RES_PCT     100u
 
+/* Runtime RT Reflections toggle (sr_tracing + sr_denoising):
+ * 1 = stock (ON), 0 = OFF via runtime flag 0xb3f3e90 (buffers stay allocated). */
+#define DEFAULT_RT_REFL 1u
+
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
 #define SITE1_LEN     6u
@@ -73,6 +77,8 @@ static const char *const WANT_TITLE_IDS[] = {
 #define TIMESTEP_LEN  6u
 #define TIMESTEP2_RVA 0x41ec831u /* vmovss [0xabab4a0], xmm0          (8 bytes)  */
 #define TIMESTEP2_LEN 8u
+#define RT_REFL_RVA   0x149dd26u /* mov al, byte ptr [rax + 0x753]    (6 bytes)  */
+#define RT_REFL_LEN   6u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -129,6 +135,15 @@ static const uint8_t TAA2U_CTX[64] = {
     0x00,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
 };
 
+/* 64 bytes of the clean GTAVI eboot around RT Reflections runtime flag writer
+ * (0x149dd26: mov al, [rax+0x753] -> [0xb3f3e90], site at +32, len 6): */
+static const uint8_t RT_REFL_CTX[64] = {
+    0x83,0x3d,0xab,0xe2,0xa6,0x0a,0x01,0x89,0x0d,0x45,0x21,0xf5,0x09,0x89,0x0d,0xc7,
+    0x21,0xf5,0x09,0x0f,0x84,0x80,0xdf,0xff,0xff,0x48,0x8b,0x05,0xd2,0x70,0xa6,0x0a,
+    0x8a,0x80,0x53,0x07,0x00,0x00,0x88,0x05,0x5e,0x61,0xf5,0x09,0x84,0xc0,0x0f,0x84,
+    0x6c,0xdf,0xff,0xff,0x80,0x3d,0xc7,0x20,0xf5,0x09,0x00,0x75,0x0d,0xf6,0x05,0xca
+};
+
 #ifndef LOG_DIR
 #define LOG_DIR "/data/gtavi-unlockfps"
 #endif
@@ -172,6 +187,7 @@ static FILE *g_log;
 static struct timespec g_t0;
 static uint32_t g_target_fps = DEFAULT_FPS;
 static uint32_t g_res_pct = DEFAULT_RES_PCT;
+static uint32_t g_rt_refl = DEFAULT_RT_REFL;
 
 static unsigned long elapsed_ms(void) {
     struct timespec t;
@@ -249,6 +265,7 @@ static int lock_instance(void) {
 static void load_settings(void) {
     char line[128];
     int saw_res_pct = 0;
+    int saw_rt_refl = 0;
     FILE *f = fopen(CONF_PATH, "r");
     if (!f) {
         f = fopen(CONF_PATH, "w");
@@ -256,9 +273,11 @@ static void load_settings(void) {
             fprintf(f, "# GTAVI Unlock FPS runtime patcher settings\n"
                        "# fps: target FPS cap (30..120). Default: 60.\n"
                        "# res_pct: TAA2U internal render resolution %% of 4K output (stock PS5 = 67%% / 1440p):\n"
-                       "#   0 = stock, 50 = 1080p, 45 = 972p, 40 = 864p, 33 = 720p (range 25..100)\n"
+                       "#   0 = stock, 50 = 1080p (range 50..100)\n"
+                       "# rt_reflections: 1 = stock (ON), 0 = disable RT Reflections at runtime\n"
                        "fps=%u\n"
-                       "res_pct=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT);
+                       "res_pct=%u\n"
+                       "rt_reflections=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_RT_REFL);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -284,17 +303,31 @@ static void load_settings(void) {
                 logmsg("WARN", "ignoring res_pct=%d (must be 0 or %u..%u)",
                        v, MIN_RES_PCT, MAX_RES_PCT);
             }
+        } else if (!strncmp(line, "rt_reflections", 14)) {
+            saw_rt_refl = 1;
+            if (v == 0 || v == 1) {
+                g_rt_refl = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring rt_reflections=%d (must be 0 or 1)", v);
+            }
         }
     }
     fclose(f);
 
-    if (!saw_res_pct) {
+    if (!saw_res_pct || !saw_rt_refl) {
         f = fopen(CONF_PATH, "a");
         if (f) {
-            fprintf(f, "# res_pct: TAA2U internal resolution %% (stock=67%%, 50=1080p, 40=864p, 0=stock)\n"
-                       "res_pct=%u\n", DEFAULT_RES_PCT);
+            if (!saw_res_pct) {
+                fprintf(f, "# res_pct: TAA2U internal resolution %% (stock=67%%, 50=1080p, 0=stock)\n"
+                           "res_pct=%u\n", DEFAULT_RES_PCT);
+                logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
+            }
+            if (!saw_rt_refl) {
+                fprintf(f, "# rt_reflections: 1 = stock (ON), 0 = disable RT Reflections at runtime\n"
+                           "rt_reflections=%u\n", DEFAULT_RT_REFL);
+                logmsg("INFO", "appended default rt_reflections=%u to %s", DEFAULT_RT_REFL, CONF_PATH);
+            }
             fclose(f);
-            logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
         }
     }
 }
@@ -567,6 +600,7 @@ int main(void) {
     struct patch_site timestep_site;
     struct patch_site timestep2_site;
     struct patch_site taa2u_site;
+    struct patch_site rt_refl_site;
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
     unsigned skipped_n = 0, proc_n = 0, i;
@@ -576,6 +610,7 @@ int main(void) {
     unsigned poll, fails = 0;
     int already_open = 0, already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
+    int rt_refl_applied = 0, rt_refl_alr = 0;
     unsigned long found_ms;
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
@@ -589,8 +624,8 @@ int main(void) {
     }
     log_open();
     load_settings();
-    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%)",
-           TOOL_VERSION, g_target_fps, g_res_pct);
+    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, rt_reflections=%u)",
+           TOOL_VERSION, g_target_fps, g_res_pct, g_rt_refl);
 #ifndef HOST_TEST
     logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
            (kernel_get_fw_version() >> 16) & 0xff);
@@ -658,12 +693,28 @@ int main(void) {
         memcpy(taa2u_site.patch + 5, store_ret, sizeof(store_ret));
     }
 
+    /* Build RT Reflections runtime disable patch (0x149dd26, 6B):
+     *   31 c0 90 90 90 90   xor eax, eax; nop*4
+     * Keeps 0xb3f3dd4 = 1 (all render target buffers allocated, no NULL crash)
+     * while zeroing per-frame runtime flag 0xb3f3e90 to skip sr_tracing/denoising. */
+    memset(&rt_refl_site, 0, sizeof(rt_refl_site));
+    rt_refl_site.name = "rt_reflections_off";
+    rt_refl_site.rva = RT_REFL_RVA;
+    rt_refl_site.len = RT_REFL_LEN;
+    rt_refl_site.ctx = RT_REFL_CTX;
+    rt_refl_site.patch[0] = 0x31;
+    rt_refl_site.patch[1] = 0xc0;
+    rt_refl_site.patch[2] = 0x90;
+    rt_refl_site.patch[3] = 0x90;
+    rt_refl_site.patch[4] = 0x90;
+    rt_refl_site.patch[5] = 0x90;
+
     if (g_res_pct > 0)
-        notify("ready (FPS: %u, Res: %u%%). Start GTAVI within 10 min.",
-               g_target_fps, g_res_pct);
+        notify("ready (FPS: %u, Res: %u%%%s). Start GTAVI within 10 min.",
+               g_target_fps, g_res_pct, g_rt_refl ? "" : ", RT Refl: OFF");
     else
-        notify("ready (FPS: %u, Res: stock). Start GTAVI within 10 min.",
-               g_target_fps);
+        notify("ready (FPS: %u, Res: stock%s). Start GTAVI within 10 min.",
+               g_target_fps, g_rt_refl ? "" : ", RT Refl: OFF");
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -752,17 +803,30 @@ int main(void) {
         logmsg("WARN", "fwTimer floor2 context mismatch");
     }
 
+    if (!g_rt_refl) {
+        if (verify_site(pid, base, &rt_refl_site) == 1) {
+            if (!apply_site(pid, base, &rt_refl_site, &rt_refl_alr))
+                rt_refl_applied = 1;
+            else
+                logmsg("WARN", "RT Reflections disable write failed");
+        } else {
+            logmsg("WARN", "RT Reflections context mismatch");
+        }
+    }
+
     update_live_globals(pid, base);
     logmsg("OK", "all patches applied in %lu ms", elapsed_ms() - found_ms);
 
-    if (already1 && already2 && (!g_res_pct || taa2u_alr)) {
-        notify("already active for this session (FPS: %u, Res: %u%%).",
-               g_target_fps, g_res_pct);
+    if (already1 && already2 && (!g_res_pct || taa2u_alr) &&
+        (g_rt_refl || rt_refl_alr)) {
+        notify("already active for this session (FPS: %u, Res: %u%%%s).",
+               g_target_fps, g_res_pct, rt_refl_alr ? ", RT Refl: OFF" : "");
     } else if (taa2u_applied) {
-        notify("FPS unlocked (%u) + TAA2U Res %u%% ON! Enjoy.",
-               g_target_fps, g_res_pct);
+        notify("FPS unlocked (%u) + TAA2U Res %u%%%s ON! Enjoy.",
+               g_target_fps, g_res_pct, rt_refl_applied ? " + RT Refl OFF" : "");
     } else {
-        notify("FPS unlocked (target %u FPS). Enjoy.", g_target_fps);
+        notify("FPS unlocked (target %u FPS%s). Enjoy.",
+               g_target_fps, rt_refl_applied ? ", RT Refl OFF" : "");
     }
 
     return finish(EXIT_OK);
