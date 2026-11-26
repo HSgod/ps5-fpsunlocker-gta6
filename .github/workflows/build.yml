@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -30,3 +33,15 @@ jobs:
         with:
           name: GTA6-60FPS-Payload
           path: src/*.elf
+
+      - name: Publish raw ELF to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER=$(sed -n 's/^#define TOOL_VERSION "\(.*\)"/\1/p' src/gta6-60fps.c)
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "GTA6 60FPS v${VER}" --notes "Automated PS5 payload build from commit ${GITHUB_SHA::7}."
+            gh release upload latest src/*.elf --clobber
+          else
+            gh release create latest src/*.elf --title "GTA6 60FPS v${VER}" --notes "Automated PS5 payload build from commit ${GITHUB_SHA::7}."
+          fi
