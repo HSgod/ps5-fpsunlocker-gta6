@@ -1,18 +1,20 @@
-/* gtavi-unlockfps.c -- one-shot runtime FPS unlock payload for GTAVI on a
- * jailbroken PS5.
+/* gtavi-unlockfps.c -- one-shot runtime FPS unlock & resolution scale payload
+ * for Grand Theft Auto VI (PPSA38500) on a jailbroken PS5.
  *
  * What this payload does:
- *   - loads target FPS from /data/gtavi-unlockfps/fps.txt (default 60; creates
- *     the file if missing so it can be edited over FTP, e.g. fps=40 or fps=60),
- *   - waits up to 10 minutes for GTAVI (eboot.bin) to start, skipping PS5
- *     system/UI apps (NPXS*),
+ *   - loads settings from /data/gtavi-unlockfps/fps.txt (defaults: fps=60,
+ *     scale=2 [2/3]; editable over FTP without rebuilding),
+ *   - waits up to 10 minutes for PPSA38500 (eboot.bin) to start without
+ *     touching memory of any other app or system process,
  *   - resolves eboot.bin's ASLR base address and verifies 64 bytes of context
- *     around both target FPS writer sites before touching memory,
- *   - patches both sites to lift the 30 FPS cap (using DMAP page-table writes
- *     on FW >= 8.40, or mdbg_copyin on older firmwares),
- *   - updates live g_TargetFrameTimeUs and g_RequestedFrameLock in RAM so the
- *     change takes effect even if the game was already running,
- *   - verifies readback, shows PS5 notifications, writes a log, and exits.
+ *     around each target site before writing anything,
+ *   - patches both target FPS writer sites (0x3f73e51, 0x40d2be1) and updates
+ *     live g_TargetFrameTimeUs / g_RequestedFrameLock globals in RAM,
+ *   - when scale > 0 (1..10), patches both resolution scale sites (0x3a2baa0,
+ *     0x3f73e2c) so the engine renders at a lower internal resolution before
+ *     TAA2U upscaling (must be launched before GTAVI starts),
+ *   - uses DMAP page-table writes on FW >= 8.40 (or mdbg_copyin on older FW),
+ *     verifies readback, shows PS5 notifications, writes a log, and exits.
  */
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -38,7 +40,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.0"
+#define TOOL_VERSION "1.1"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -48,15 +50,31 @@
 
 #define WANT_TITLE_ID "PPSA38500"
 
-#define DEFAULT_FPS 60u
-#define MIN_FPS     30u
-#define MAX_FPS     120u
+#define DEFAULT_FPS   60u
+#define MIN_FPS       30u
+#define MAX_FPS       120u
+
+/* Resolution scale index (RAGE ratio table at 0x9ea2818 / 0x9ea2854):
+ *   0=stock, 1=1/2, 2=2/3, 3=3/4, 4=4/5, 5=5/6, 6=7/8, 7=9/10,
+ *   8=11/12, 9=14/15, 10=29/30 */
+#define DEFAULT_SCALE 2u
+#define MAX_SCALE     10u
+
+static const char *const SCALE_NAMES[MAX_SCALE + 1] = {
+    "stock", "1/2", "2/3", "3/4", "4/5", "5/6",
+    "7/8", "9/10", "11/12", "14/15", "29/30"
+};
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
-#define SITE1_RVA 0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes) */
-#define SITE1_LEN 6u
-#define SITE2_RVA 0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes) */
-#define SITE2_LEN 7u
+#define SITE1_RVA  0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes) */
+#define SITE1_LEN  6u
+#define SITE2_RVA  0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes) */
+#define SITE2_LEN  7u
+
+#define SCALE1_RVA 0x3a2baa0u /* mov eax, dword ptr [rdi + 0x140]  (6 bytes) */
+#define SCALE1_LEN 6u
+#define SCALE2_RVA 0x3f73e2cu /* mov eax, dword ptr [rbx + 0xd58]  (6 bytes) */
+#define SCALE2_LEN 6u
 
 /* Live globals updated by Site 1 & Site 2 and polled by SetFlipRate: */
 #define G_TARGET_FRAMETIME_US_RVA 0xe3be220u /* uint32_t: 1000000 / fps */
@@ -80,6 +98,22 @@ static const uint8_t SITE2_CTX[64] = {
     0xc0,0x0f,0x44,0xd1,0xc5,0xea,0x2a,0xc2,0xc5,0xf2,0x5e,0xc0,0xc4,0xe1,0xfa,0x2c
 };
 
+/* 64 bytes of the clean GTAVI eboot around Scale Site 1 (site at +32): */
+static const uint8_t SCALE1_CTX[64] = {
+    0xf7,0x49,0x89,0xfc,0x49,0x8b,0x01,0x48,0x89,0x45,0xd0,0x8b,0x87,0xf8,0x01,0x00,
+    0x00,0x89,0x06,0xbe,0x01,0x00,0x00,0x00,0x8b,0x87,0xfc,0x01,0x00,0x00,0x89,0x02,
+    0x8b,0x87,0x40,0x01,0x00,0x00,0xbf,0x01,0x00,0x00,0x00,0xff,0xc8,0x83,0xf8,0x0e,
+    0x77,0x17,0x89,0xc0,0x48,0x8d,0x15,0x5d,0x6d,0x47,0x06,0x4c,0x8d,0x15,0x92,0x6d
+};
+
+/* 64 bytes of the clean GTAVI eboot around Scale Site 2 (site at +32): */
+static const uint8_t SCALE2_CTX[64] = {
+    0x2c,0xf9,0xff,0xff,0x4c,0x89,0xe7,0xc5,0xf2,0x5e,0xc0,0xc5,0xfa,0x11,0x05,0xf9,
+    0x7c,0x84,0x0a,0xe8,0x2c,0xd4,0xff,0xff,0x4c,0x89,0xe7,0xe8,0xb4,0xf4,0xa1,0xfe,
+    0x8b,0x83,0x58,0x0d,0x00,0x00,0xc5,0xfa,0x10,0x0d,0x32,0x89,0xd0,0x05,0xba,0xe8,
+    0x03,0x00,0x00,0xb9,0xe8,0x03,0x00,0x00,0x4c,0x8d,0x3d,0x65,0x78,0xdb,0xfd,0x89
+};
+
 #ifndef LOG_DIR
 #define LOG_DIR "/data/gtavi-unlockfps"
 #endif
@@ -88,13 +122,13 @@ static const uint8_t SITE2_CTX[64] = {
 
 #define LOCK_PORT 47961 /* loopback UDP port held as a single-instance lock */
 
-#define POLL_USEC     250000u /* 250 ms (gentle on SceShellUI / kernel) */
-#define WAIT_POLLS    2400u   /* 2400 * 250 ms = 10 min */
+#define POLL_USEC     100000u /* 100 ms: fast enough to beat render init, gentle on shell */
+#define WAIT_POLLS    6000u   /* 6000 * 100 ms = 10 min */
 #define LIST_TRIES    5u
-#define RESOLVE_TRIES 30u     /* 30 * 300 ms = 9 s for eboot mapping */
-#define RESOLVE_USEC  300000u
+#define RESOLVE_TRIES 60u     /* 60 * 100 ms = 6 s for eboot mapping */
+#define RESOLVE_USEC  100000u
 #define WRITE_TRIES   3u
-#define WRITE_USEC    200000u
+#define WRITE_USEC    100000u
 
 enum {
     EXIT_OK = 0,
@@ -122,6 +156,7 @@ int sceKernelGetAppInfo(pid_t pid, void *info);
 static FILE *g_log;
 static struct timespec g_t0;
 static uint32_t g_target_fps = DEFAULT_FPS;
+static uint32_t g_res_scale = DEFAULT_SCALE;
 
 static unsigned long elapsed_ms(void) {
     struct timespec t;
@@ -198,13 +233,17 @@ static int lock_instance(void) {
 
 static void load_settings(void) {
     char line[128];
+    int saw_scale = 0;
     FILE *f = fopen(CONF_PATH, "r");
     if (!f) {
         f = fopen(CONF_PATH, "w");
         if (f) {
             fprintf(f, "# GTAVI Unlock FPS runtime patcher settings\n"
-                       "# Target FPS cap (30..120). Recommended: 60 (unlocked up to 60Hz) or 40 (120Hz/VRR).\n"
-                       "fps=%u\n", DEFAULT_FPS);
+                       "# fps: target FPS cap (30..120). Recommended: 60 (or 40 on 120Hz/VRR).\n"
+                       "# scale: internal resolution scale before TAA2U upscaling (0..10):\n"
+                       "#   0 = stock, 1 = 1/2, 2 = 2/3, 3 = 3/4, 4 = 4/5, 5 = 5/6\n"
+                       "fps=%u\n"
+                       "scale=%u\n", DEFAULT_FPS, DEFAULT_SCALE);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -215,16 +254,34 @@ static void load_settings(void) {
         int v;
         if (line[0] == '#' || !eq)
             continue;
+        v = atoi(eq + 1);
         if (!strncmp(line, "fps", 3)) {
-            v = atoi(eq + 1);
             if (v >= (int)MIN_FPS && v <= (int)MAX_FPS) {
                 g_target_fps = (uint32_t)v;
             } else {
                 logmsg("WARN", "ignoring fps=%d (must be %u..%u)", v, MIN_FPS, MAX_FPS);
             }
+        } else if (!strncmp(line, "scale", 5)) {
+            saw_scale = 1;
+            if (v >= 0 && v <= (int)MAX_SCALE) {
+                g_res_scale = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring scale=%d (must be 0..%u)", v, MAX_SCALE);
+            }
         }
     }
     fclose(f);
+
+    /* Upgrading from v1.0 config: append default scale= so it's visible over FTP */
+    if (!saw_scale) {
+        f = fopen(CONF_PATH, "a");
+        if (f) {
+            fprintf(f, "# scale: 0 = stock, 1 = 1/2, 2 = 2/3, 3 = 3/4, 4 = 4/5, 5 = 5/6\n"
+                       "scale=%u\n", DEFAULT_SCALE);
+            fclose(f);
+            logmsg("INFO", "appended default scale=%u to %s", DEFAULT_SCALE, CONF_PATH);
+        }
+    }
 }
 
 /* ---------------------------------------------------------- game access */
@@ -358,21 +415,29 @@ static int ctx_matches_site(const uint8_t cur[64], const struct patch_site *s) {
                    64u - CTX_OFF - s->len);
 }
 
-/* Returns: 1 = matches GTAVI (clean or already patched), 0 = different game,
+static int verify_site(uint32_t pid, uint64_t base, const struct patch_site *s) {
+    uint8_t ctx[64];
+    if (proc_read(pid, base + s->rva - CTX_OFF, ctx, 64))
+        return -1;
+    return ctx_matches_site(ctx, s) ? 1 : 0;
+}
+
+/* Returns: 1 = matches GTAVI (clean or already patched), 0 = mismatch,
  * -1 = memory not ready yet. */
 static int verify_gtavi_process(uint32_t pid, const struct patch_site sites[2],
                                 uint64_t *out_base) {
     uint64_t base = 0;
-    uint8_t ctx[64];
     unsigned tries;
     for (tries = 1; tries <= RESOLVE_TRIES; tries++) {
         if (!eboot_base(pid, &base)) {
-            if (!proc_read(pid, base + sites[0].rva - CTX_OFF, ctx, 64)) {
-                if (!ctx_matches_site(ctx, &sites[0]))
+            int r0 = verify_site(pid, base, &sites[0]);
+            if (r0 == 0)
+                return 0;
+            if (r0 == 1) {
+                int r1 = verify_site(pid, base, &sites[1]);
+                if (r1 == 0)
                     return 0;
-                if (!proc_read(pid, base + sites[1].rva - CTX_OFF, ctx, 64)) {
-                    if (!ctx_matches_site(ctx, &sites[1]))
-                        return 0;
+                if (r1 == 1) {
                     *out_base = base;
                     return 1;
                 }
@@ -412,8 +477,8 @@ static int apply_site(uint32_t pid, uint64_t base, const struct patch_site *s,
     return -1;
 }
 
-/* Also update live RAM globals so the patch takes effect even if GTAVI was
- * already running before the payload was launched. */
+/* Also update live RAM globals so the FPS unlock takes effect even if GTAVI
+ * was already running before the payload was launched. */
 static void update_live_globals(uint32_t pid, uint64_t base) {
     uint32_t cur_us = 0;
     uint32_t want_us = 1000000u / g_target_fps;
@@ -459,7 +524,8 @@ static int finish(int code) {
 }
 
 int main(void) {
-    struct patch_site sites[2];
+    struct patch_site fps_sites[2];
+    struct patch_site scale_sites[2];
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
     unsigned skipped_n = 0, proc_n = 0, i;
@@ -468,6 +534,7 @@ int main(void) {
     char titleid[16] = "?";
     unsigned poll, fails = 0;
     int already_open = 0, already1 = 0, already2 = 0;
+    int scale_applied = 0, scale_alr1 = 0, scale_alr2 = 0;
     unsigned long found_ms;
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
@@ -481,35 +548,55 @@ int main(void) {
     }
     log_open();
     load_settings();
-    logmsg("INFO", "gtavi-unlockfps v%s started (target=%u FPS)", TOOL_VERSION, g_target_fps);
+    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, scale=%u [%s])",
+           TOOL_VERSION, g_target_fps, g_res_scale, SCALE_NAMES[g_res_scale]);
 #ifndef HOST_TEST
     logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
            (kernel_get_fw_version() >> 16) & 0xff);
 #endif
 
-    /* Build patch bytes for target FPS:
+    /* Build FPS patch bytes:
      *   Site 1 (6B): mov eax, <fps>; nop          -> b8 <imm32> 90
      *   Site 2 (7B): mov eax, <fps>; xchg ax, ax  -> b8 <imm32> 66 90 */
-    memset(sites, 0, sizeof(sites));
-    sites[0].name = "writer1";
-    sites[0].rva = SITE1_RVA;
-    sites[0].len = SITE1_LEN;
-    sites[0].ctx = SITE1_CTX;
-    sites[0].patch[0] = 0xb8;
-    put32le(sites[0].patch + 1, g_target_fps);
-    sites[0].patch[5] = 0x90;
+    memset(fps_sites, 0, sizeof(fps_sites));
+    fps_sites[0].name = "fps_writer1";
+    fps_sites[0].rva = SITE1_RVA;
+    fps_sites[0].len = SITE1_LEN;
+    fps_sites[0].ctx = SITE1_CTX;
+    fps_sites[0].patch[0] = 0xb8;
+    put32le(fps_sites[0].patch + 1, g_target_fps);
+    fps_sites[0].patch[5] = 0x90;
 
-    sites[1].name = "writer2";
-    sites[1].rva = SITE2_RVA;
-    sites[1].len = SITE2_LEN;
-    sites[1].ctx = SITE2_CTX;
-    sites[1].patch[0] = 0xb8;
-    put32le(sites[1].patch + 1, g_target_fps);
-    sites[1].patch[5] = 0x66;
-    sites[1].patch[6] = 0x90;
+    fps_sites[1].name = "fps_writer2";
+    fps_sites[1].rva = SITE2_RVA;
+    fps_sites[1].len = SITE2_LEN;
+    fps_sites[1].ctx = SITE2_CTX;
+    fps_sites[1].patch[0] = 0xb8;
+    put32le(fps_sites[1].patch + 1, g_target_fps);
+    fps_sites[1].patch[5] = 0x66;
+    fps_sites[1].patch[6] = 0x90;
 
-    notify("ready (target %u FPS). Start GTAVI (%s) within 10 min.",
-           g_target_fps, WANT_TITLE_ID);
+    /* Build resolution scale patch bytes:
+     *   Scale 1 & 2 (6B): mov eax, <scale>; nop   -> b8 <imm32> 90 */
+    memset(scale_sites, 0, sizeof(scale_sites));
+    scale_sites[0].name = "res_scale1";
+    scale_sites[0].rva = SCALE1_RVA;
+    scale_sites[0].len = SCALE1_LEN;
+    scale_sites[0].ctx = SCALE1_CTX;
+    scale_sites[0].patch[0] = 0xb8;
+    put32le(scale_sites[0].patch + 1, g_res_scale);
+    scale_sites[0].patch[5] = 0x90;
+
+    scale_sites[1].name = "res_scale2";
+    scale_sites[1].rva = SCALE2_RVA;
+    scale_sites[1].len = SCALE2_LEN;
+    scale_sites[1].ctx = SCALE2_CTX;
+    scale_sites[1].patch[0] = 0xb8;
+    put32le(scale_sites[1].patch + 1, g_res_scale);
+    scale_sites[1].patch[5] = 0x90;
+
+    notify("ready (FPS: %u, Scale: %s). Start GTAVI (%s) within 10 min.",
+           g_target_fps, SCALE_NAMES[g_res_scale], WANT_TITLE_ID);
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -524,8 +611,6 @@ int main(void) {
         for (i = 0; i < proc_n; i++) {
             if (is_skipped_pid(skipped, skipped_n, procs[i].pid))
                 continue;
-            /* Only inspect the exact target title (never touch memory of
-             * system apps or other homebrew/games while waiting). */
             if (strcmp(procs[i].titleid, WANT_TITLE_ID)) {
                 logmsg("INFO", "skipping %s (pid %u)", procs[i].titleid,
                        procs[i].pid);
@@ -539,9 +624,9 @@ int main(void) {
         }
         if (pid)
             break;
-        if (poll && poll % 120u == 0)
+        if (poll && poll % 300u == 0)
             logmsg("INFO", "still waiting for %s (%u s)", WANT_TITLE_ID,
-                   poll / 4u);
+                   poll / 10u);
         usleep(POLL_USEC);
     }
 
@@ -553,10 +638,9 @@ int main(void) {
     found_ms = elapsed_ms();
     logmsg("OK", "found %s pid %u%s, verifying eboot...", titleid, pid,
            already_open ? " (already open)" : "");
-    notify("found %s, unlocking FPS (target %u)...", titleid, g_target_fps);
 
     {
-        int match = verify_gtavi_process(pid, sites, &base);
+        int match = verify_gtavi_process(pid, fps_sites, &base);
         if (match == 0) {
             notify("%s eboot bytes do not match supported build. Nothing changed.",
                    titleid);
@@ -570,8 +654,26 @@ int main(void) {
     logmsg("OK", "GTAVI verified: %s pid %u base 0x%llx", titleid, pid,
            (unsigned long long)base);
 
-    if (apply_site(pid, base, &sites[0], &already1) ||
-        apply_site(pid, base, &sites[1], &already2)) {
+    /* Apply resolution scale first so it beats render target creation at startup */
+    if (g_res_scale > 0) {
+        if (already_open) {
+            logmsg("WARN", "GTAVI was already open; skipping scale=%u (load payload before game)",
+                   g_res_scale);
+        } else if (verify_site(pid, base, &scale_sites[0]) == 1 &&
+                   verify_site(pid, base, &scale_sites[1]) == 1) {
+            if (!apply_site(pid, base, &scale_sites[0], &scale_alr1) &&
+                !apply_site(pid, base, &scale_sites[1], &scale_alr2)) {
+                scale_applied = 1;
+            } else {
+                logmsg("WARN", "resolution scale write failed; continuing with FPS unlock");
+            }
+        } else {
+            logmsg("WARN", "resolution scale context mismatch; continuing with FPS unlock");
+        }
+    }
+
+    if (apply_site(pid, base, &fps_sites[0], &already1) ||
+        apply_site(pid, base, &fps_sites[1], &already2)) {
         notify("write failed. Restart GTAVI and check %s", LOG_PATH);
         return finish(EXIT_WRITE_FAIL);
     }
@@ -579,10 +681,17 @@ int main(void) {
     update_live_globals(pid, base);
     logmsg("OK", "all patches applied in %lu ms", elapsed_ms() - found_ms);
 
-    if (already1 && already2)
+    if (already1 && already2) {
         notify("FPS unlock (%u FPS) already active for this session.", g_target_fps);
-    else
+    } else if (scale_applied) {
+        notify("FPS unlocked (%u) + Scale %s ON! Enjoy.",
+               g_target_fps, SCALE_NAMES[g_res_scale]);
+    } else if (g_res_scale > 0 && already_open) {
+        notify("FPS unlocked (%u). Restart GTAVI after loading payload for Scale %s.",
+               g_target_fps, SCALE_NAMES[g_res_scale]);
+    } else {
         notify("FPS unlocked (target %u FPS). Enjoy.", g_target_fps);
+    }
 
     return finish(EXIT_OK);
 }
