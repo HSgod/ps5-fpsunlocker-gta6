@@ -51,6 +51,17 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
+## Thermals & Temperatures
+
+Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes the idle time between frames, so the PS5 CPU/SoC runs at sustained full load—similar to native 60 FPS titles. Seeing **5–8 °C higher CPU temperatures** compared to stock 30 FPS is completely expected.
+
+* The PS5's Zen 2 APU is rated up to ~100–105 °C `TjMax` and has built-in hardware thermal protection (overheating warning and automatic shutdown well before damage can occur).
+* However, if your console reaches **~88–90 °C** (especially if it already runs at 80–83 °C at stock 30 FPS), it usually points to **dust buildup, restricted airflow, or dry/shifted liquid metal** on older PS5 Fat units.
+* **Recommended steps if temps are high:**
+  * Adjust your fan curve / lower the target temperature via **etaHEN / PS5 Fan Control**.
+  * Ensure the console has open ventilation and clean the heatsink/fan of dust.
+  * Optionally raise `res_pct` (e.g. `55`–`60`) or lower `fps` in `fps.txt` to reduce sustained CPU load.
+
 ## How It Works
 
 * Watches running `eboot.bin` processes strictly for `PPSA01547`, `PPSA29660`, and `PPSA38500` without touching memory of system apps or other titles.
