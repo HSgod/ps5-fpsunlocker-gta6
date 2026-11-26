@@ -38,7 +38,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.0"
+#define TOOL_VERSION "1.1"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -271,40 +271,14 @@ static int eboot_base(uint32_t pid, uint64_t *base) {
 #endif
 }
 
-static int find_game_pid(uint32_t *pid, uint8_t info[APP_INFO_LEN]) {
-#ifndef HOST_TEST
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
-    size_t size = 0;
-    uint8_t *buf, *p;
-    if (sysctl(mib, 4, NULL, &size, NULL, 0) || !(buf = malloc(size)))
-        return -1;
-    if (sysctl(mib, 4, buf, &size, NULL, 0)) {
-        free(buf);
-        return -1;
-    }
-    *pid = 0;
-    for (p = buf; p < buf + size;) {
-        struct kinfo_proc *ki = (struct kinfo_proc *)p;
-        if (ki->ki_structsize <= 0)
-            break;
-        p += ki->ki_structsize;
-        if (strncmp(ki->ki_comm, "eboot.bin", 9) || ki->ki_pid <= 0)
-            continue;
-        memset(info, 0, APP_INFO_LEN);
-        if (sceKernelGetAppInfo(ki->ki_pid, info))
-            continue;
-        *pid = (uint32_t)ki->ki_pid;
-        break;
-    }
-    free(buf);
-    return 0;
-#else
-    *pid = 0;
-    memset(info, 0, APP_INFO_LEN);
-    return 0;
-#endif
-}
+#define MAX_EBOOTS 16
 
+struct eboot_proc {
+    uint32_t pid;
+    char titleid[16];
+};
+
+#ifndef HOST_TEST
 static int find_titleid(const uint8_t *info, size_t len, char out[16]) {
     size_t i, k;
     for (i = 0; i + 9 <= len; i++) {
@@ -321,6 +295,43 @@ static int find_titleid(const uint8_t *info, size_t len, char out[16]) {
     }
     strcpy(out, "?");
     return -1;
+}
+#endif
+
+static int list_eboot_procs(struct eboot_proc out[MAX_EBOOTS], unsigned *count) {
+#ifndef HOST_TEST
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+    size_t size = 0;
+    uint8_t *buf, *p;
+    uint8_t info[APP_INFO_LEN];
+    *count = 0;
+    if (sysctl(mib, 4, NULL, &size, NULL, 0) || !(buf = malloc(size)))
+        return -1;
+    if (sysctl(mib, 4, buf, &size, NULL, 0)) {
+        free(buf);
+        return -1;
+    }
+    for (p = buf; p < buf + size && *count < MAX_EBOOTS;) {
+        struct kinfo_proc *ki = (struct kinfo_proc *)p;
+        if (ki->ki_structsize <= 0)
+            break;
+        p += ki->ki_structsize;
+        if (strncmp(ki->ki_comm, "eboot.bin", 9) || ki->ki_pid <= 0)
+            continue;
+        memset(info, 0, sizeof(info));
+        if (sceKernelGetAppInfo(ki->ki_pid, info))
+            continue;
+        out[*count].pid = (uint32_t)ki->ki_pid;
+        find_titleid(info, sizeof(info), out[*count].titleid);
+        (*count)++;
+    }
+    free(buf);
+    return 0;
+#else
+    (void)out;
+    *count = 0;
+    return 0;
+#endif
 }
 
 /* ------------------------------------------------------------ the patch */
@@ -433,11 +444,26 @@ static int finish(int code) {
     return code;
 }
 
+static int is_skipped_pid(const uint32_t *skipped, unsigned n, uint32_t pid) {
+    unsigned i;
+    for (i = 0; i < n; i++)
+        if (skipped[i] == pid)
+            return 1;
+    return 0;
+}
+
+static void add_skipped_pid(uint32_t *skipped, unsigned *n, uint32_t pid) {
+    if (*n < MAX_EBOOTS && !is_skipped_pid(skipped, *n, pid))
+        skipped[(*n)++] = pid;
+}
+
 int main(void) {
     struct patch_site sites[2];
-    uint32_t pid = 0, last_skipped_pid = 0;
+    struct eboot_proc procs[MAX_EBOOTS];
+    uint32_t skipped[MAX_EBOOTS];
+    unsigned skipped_n = 0, proc_n = 0, i;
+    uint32_t pid = 0;
     uint64_t base = 0;
-    uint8_t info[APP_INFO_LEN];
     char titleid[16] = "?";
     unsigned poll, fails = 0;
     int already_open = 0, already1 = 0, already2 = 0;
@@ -484,7 +510,7 @@ int main(void) {
     notify("ready (%u FPS). Start GTA 6 (waiting up to 10 min)", g_target_fps);
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
-        if (find_game_pid(&pid, info)) {
+        if (list_eboot_procs(procs, &proc_n)) {
             if (++fails > LIST_TRIES) {
                 notify("couldn't list running apps. Nothing changed.");
                 return finish(EXIT_NO_PROC_LIST);
@@ -493,23 +519,33 @@ int main(void) {
             continue;
         }
         fails = 0;
-        if (pid && pid != last_skipped_pid) {
+        for (i = 0; i < proc_n; i++) {
             int match;
-            find_titleid(info, sizeof(info), titleid);
-            match = verify_gta6_process(pid, sites, &base);
+            if (is_skipped_pid(skipped, skipped_n, procs[i].pid))
+                continue;
+            /* Ignore PlayStation system/UI apps (NPXSxxxxx) silently */
+            if (!strncmp(procs[i].titleid, "NPXS", 4)) {
+                logmsg("INFO", "skipping system app %s (pid %u)",
+                       procs[i].titleid, procs[i].pid);
+                add_skipped_pid(skipped, &skipped_n, procs[i].pid);
+                continue;
+            }
+            match = verify_gta6_process(procs[i].pid, sites, &base);
             if (match == 1) {
+                pid = procs[i].pid;
+                strcpy(titleid, procs[i].titleid);
                 already_open = (poll == 0);
                 break;
             }
             if (match == 0) {
                 logmsg("INFO", "ignoring %s (pid %u): eboot bytes do not match GTA 6",
-                       titleid, pid);
-                notify("%s is not matching GTA 6, still waiting", titleid);
-                last_skipped_pid = pid;
+                       procs[i].titleid, procs[i].pid);
+                notify("%s is not matching GTA 6, still waiting", procs[i].titleid);
+                add_skipped_pid(skipped, &skipped_n, procs[i].pid);
             }
         }
-        if (!pid)
-            last_skipped_pid = 0;
+        if (base)
+            break;
         if (poll && poll % 1500u == 0)
             logmsg("INFO", "still waiting for GTA 6 (%u s)", poll / 50u);
         usleep(POLL_USEC);
