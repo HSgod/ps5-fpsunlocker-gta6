@@ -1,27 +1,35 @@
 # GTA 6 60 FPS Runtime Patcher (PS5 Payload)
 
-Jednorazowy payload `.elf` dla zjailbreakowanego PS5, wzorowany na [armanate/rdr2-60fps-runtime-patcher](https://github.com/armanate/rdr2-60fps-runtime-patcher).
+One-shot `.elf` runtime FPS patcher payload for jailbroken **PlayStation 5** consoles, modeled after [armanate/rdr2-60fps-runtime-patcher](https://github.com/armanate/rdr2-60fps-runtime-patcher).
 
-## Jak działa
-1. Uruchamiasz payload `GTA6 60FPS_v1.0.elf` przez Payload Managera (PLDMGR / elfldr).
-2. Payload wyświetla powiadomienie i **czeka do 10 minut** na uruchomienie GTA 6 (`eboot.bin`).
-3. Po wykryciu procesu gry pobiera jego bazę ASLR w pamięci i weryfikuje **64 bajty kontekstu** wokół obu miejsc ustawiających limit FPS (`0x3f73e51` oraz `0x40d2be1`) — dzięki temu nigdy nie nadpisze złej wersji gry ani innego tytułu.
-4. Nadpisuje oba miejsca w RAM-ie (z obsługą DMAP / `ptwalk` dla FW >= 8.40 oraz `mdbg_copyin` dla starszych FW), a także aktualizuje na żywo `g_TargetFrameTimeUs` (`0xe3be220`) i `g_RequestedFrameLock` (`0xe7bbb08`), po czym kończy działanie.
+## How It Works
+1. Launch `GTA6 60FPS_v1.0.elf` via your Payload Manager (PLDMGR / `elfldr`).
+2. The payload shows a PS5 notification and **waits up to 10 minutes** for GTA 6 (`eboot.bin`) to start.
+3. Once detected, it resolves the ASLR base address of `eboot.bin` and verifies **64 bytes of surrounding context** at both target FPS writer sites (`0x3f73e51` and `0x40d2be1`) before writing anything — unrelated games or mismatched versions are safely ignored.
+4. Patches both sites in RAM (using DMAP page-table writes via `ptwalk` on FW >= 8.40, or `mdbg_copyin` on older firmwares), verifies readback, updates the live `g_TargetFrameTimeUs` (`0xe3be220`) and `g_RequestedFrameLock` (`0xe7bbb08`) globals so it works even if the game was already open, and exits cleanly.
 
-## Konfiguracja FPS (60 / 40 / inne)
-Przy pierwszym uruchomieniu payload tworzy plik `/data/gta6-60fps/fps.txt` z zawartością:
+## Configuring Target FPS (60 / 40 / Custom)
+On first launch, the payload creates `/data/gta6-60fps/fps.txt`:
 ```ini
 fps=60
 ```
-Możesz go edytować przez FTP (np. zmienić na `fps=40` dla stabilniejszego klatkażu na TV 120 Hz / VRR) — bez ponownej kompilacji. Logi zapisują się w `/data/gta6-60fps/gta6-60fps.log`.
+You can edit this file over FTP (e.g., set `fps=40` for smoother frame pacing on 120 Hz / VRR displays, or any value between `30` and `120`) without recompiling. Runtime logs are written to `/data/gta6-60fps/gta6-60fps.log`.
 
-## Kompilacja do `.elf`
-### Opcja 1: Docker (macOS / Linux / Windows)
+## Building `.elf`
+
+### Option 1: GitHub Actions
+Push to GitHub — the included [`.github/workflows/build.yml`](.github/workflows/build.yml) workflow automatically builds `GTA6 60FPS_v1.0.elf` and uploads it under **Actions → Artifacts** (`GTA6-60FPS-Payload`).
+
+### Option 2: Docker (macOS / Linux / Windows)
 ```sh
 chmod +x build.sh
 ./build.sh
 ```
-Gotowy plik pojawi się w `src/GTA6 60FPS_v1.0.elf`.
+The compiled payload will be output to `src/GTA6 60FPS_v1.0.elf`.
 
-### Opcja 2: GitHub Actions (bez instalowania niczego lokalnie)
-Wrzuć folder jako repozytorium na GitHub — workflow `.github/workflows/build.yml` automatycznie skompiluje `GTA6 60FPS_v1.0.elf` i udostępni go do pobrania w zakładce **Actions -> Artifacts**.
+### Option 3: Local `ps5-payload-sdk`
+```sh
+export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+cd src
+make
+```
