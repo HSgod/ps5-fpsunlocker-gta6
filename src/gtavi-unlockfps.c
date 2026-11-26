@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.12"
+#define TOOL_VERSION "1.13"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -59,14 +59,18 @@ static const char *const WANT_TITLE_IDS[] = {
 #define MAX_FPS         120u
 
 /* Internal TAA2U render resolution percentage of output (stock PS5 = 67% / 1440p).
- * 0 = stock (untouched), 50..100 = custom percent (default 50 = 1080p on 4K). */
+ * 0 = stock (untouched), 25..100 = custom percent (default 50 = 1080p on 4K; <50 experimental). */
 #define DEFAULT_RES_PCT 50u
-#define MIN_RES_PCT     50u
+#define MIN_RES_PCT     25u
 #define MAX_RES_PCT     100u
 
 /* Runtime RT Reflections toggle (sr_tracing + sr_denoising):
  * 1 = stock ON (default), 0 = OFF via runtime flag 0xb3f3e90 (experimental, may glitch water). */
 #define DEFAULT_RT_REFL 1u
+
+/* Background daemon mode:
+ * 0 = one-shot (wait up to 10 min, patch once, exit), 1 = stay in background across restarts. */
+#define DEFAULT_DAEMON  0u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -152,8 +156,9 @@ static const uint8_t RT_REFL_CTX[64] = {
 
 #define LOCK_PORT 47961 /* loopback UDP port held as a single-instance lock */
 
-#define POLL_USEC     100000u /* 100 ms: fast enough to beat render init, gentle on shell */
-#define WAIT_POLLS    6000u   /* 6000 * 100 ms = 10 min */
+#define POLL_USEC      100000u /* 100 ms: fast enough to beat render init, gentle on shell */
+#define IDLE_POLL_USEC 500000u /* 500 ms: daemon sleep while GTAVI is already patched */
+#define WAIT_POLLS     6000u   /* 6000 * 100 ms = 10 min (one-shot mode) */
 #define LIST_TRIES    5u
 #define RESOLVE_TRIES 60u     /* 60 * 100 ms = 6 s for eboot mapping */
 #define RESOLVE_USEC  100000u
@@ -188,6 +193,7 @@ static struct timespec g_t0;
 static uint32_t g_target_fps = DEFAULT_FPS;
 static uint32_t g_res_pct = DEFAULT_RES_PCT;
 static uint32_t g_rt_refl = DEFAULT_RT_REFL;
+static uint32_t g_daemon = DEFAULT_DAEMON;
 
 static unsigned long elapsed_ms(void) {
     struct timespec t;
@@ -266,18 +272,28 @@ static void load_settings(void) {
     char line[128];
     int saw_res_pct = 0;
     int saw_rt_refl = 0;
-    FILE *f = fopen(CONF_PATH, "r");
+    int saw_daemon = 0;
+    FILE *f;
+
+    g_target_fps = DEFAULT_FPS;
+    g_res_pct = DEFAULT_RES_PCT;
+    g_rt_refl = DEFAULT_RT_REFL;
+    g_daemon = DEFAULT_DAEMON;
+
+    f = fopen(CONF_PATH, "r");
     if (!f) {
         f = fopen(CONF_PATH, "w");
         if (f) {
             fprintf(f, "# GTAVI Unlock FPS runtime patcher settings\n"
                        "# fps: target FPS cap (30..120). Default: 60.\n"
                        "# res_pct: TAA2U internal render resolution %% of 4K output (stock PS5 = 67%% / 1440p):\n"
-                       "#   0 = stock, 50 = 1080p (range 50..100)\n"
+                       "#   0 = stock, 50 = 1080p (default), 25..49 = experimental (33 = ~720p)\n"
                        "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
+                       "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
                        "fps=%u\n"
                        "res_pct=%u\n"
-                       "rt_reflections=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_RT_REFL);
+                       "rt_reflections=%u\n"
+                       "daemon=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_RT_REFL, DEFAULT_DAEMON);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -310,15 +326,22 @@ static void load_settings(void) {
             } else {
                 logmsg("WARN", "ignoring rt_reflections=%d (must be 0 or 1)", v);
             }
+        } else if (!strncmp(line, "daemon", 6)) {
+            saw_daemon = 1;
+            if (v == 0 || v == 1) {
+                g_daemon = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring daemon=%d (must be 0 or 1)", v);
+            }
         }
     }
     fclose(f);
 
-    if (!saw_res_pct || !saw_rt_refl) {
+    if (!saw_res_pct || !saw_rt_refl || !saw_daemon) {
         f = fopen(CONF_PATH, "a");
         if (f) {
             if (!saw_res_pct) {
-                fprintf(f, "# res_pct: TAA2U internal resolution %% (stock=67%%, 50=1080p, 0=stock)\n"
+                fprintf(f, "# res_pct: TAA2U internal resolution %% (0=stock, 50=1080p, 25..49=experimental)\n"
                            "res_pct=%u\n", DEFAULT_RES_PCT);
                 logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
             }
@@ -326,6 +349,11 @@ static void load_settings(void) {
                 fprintf(f, "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
                            "rt_reflections=%u\n", DEFAULT_RT_REFL);
                 logmsg("INFO", "appended default rt_reflections=%u to %s", DEFAULT_RT_REFL, CONF_PATH);
+            }
+            if (!saw_daemon) {
+                fprintf(f, "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
+                           "daemon=%u\n", DEFAULT_DAEMON);
+                logmsg("INFO", "appended default daemon=%u to %s", DEFAULT_DAEMON, CONF_PATH);
             }
             fclose(f);
         }
@@ -595,92 +623,63 @@ static int finish(int code) {
     return code;
 }
 
-int main(void) {
-    struct patch_site fps_sites[2];
-    struct patch_site timestep_site;
-    struct patch_site timestep2_site;
-    struct patch_site taa2u_site;
-    struct patch_site rt_refl_site;
-    struct eboot_proc procs[MAX_EBOOTS];
-    uint32_t skipped[MAX_EBOOTS];
-    unsigned skipped_n = 0, proc_n = 0, i;
-    uint32_t pid = 0;
-    uint64_t base = 0;
-    char titleid[16] = "?";
-    unsigned poll, fails = 0;
-    int already_open = 0, already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
-    int taa2u_applied = 0, taa2u_alr = 0;
-    int rt_refl_applied = 0, rt_refl_alr = 0;
-    unsigned long found_ms;
+struct patch_bundle {
+    struct patch_site fps[2];
+    struct patch_site timestep;
+    struct patch_site timestep2;
+    struct patch_site taa2u;
+    struct patch_site rt_refl;
+};
 
-    clock_gettime(CLOCK_MONOTONIC, &g_t0);
-#ifndef HOST_TEST
-    syscall(SYS_thr_set_name, -1, PROC_NAME);
-#endif
+static void build_patches(struct patch_bundle *b) {
+    memset(b, 0, sizeof(*b));
 
-    if (lock_instance()) {
-        notify("already running, this copy exits");
-        return EXIT_ALREADY_RUNNING;
-    }
-    log_open();
-    load_settings();
-    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, rt_reflections=%u)",
-           TOOL_VERSION, g_target_fps, g_res_pct, g_rt_refl);
-#ifndef HOST_TEST
-    logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
-           (kernel_get_fw_version() >> 16) & 0xff);
-#endif
-
-    /* Build FPS patch bytes:
+    /* FPS cap writers:
      *   Site 1 (6B): mov eax, <fps>; nop          -> b8 <imm32> 90
      *   Site 2 (7B): mov eax, <fps>; xchg ax, ax  -> b8 <imm32> 66 90 */
-    memset(fps_sites, 0, sizeof(fps_sites));
-    fps_sites[0].name = "fps_writer1";
-    fps_sites[0].rva = SITE1_RVA;
-    fps_sites[0].len = SITE1_LEN;
-    fps_sites[0].ctx = SITE1_CTX;
-    fps_sites[0].patch[0] = 0xb8;
-    put32le(fps_sites[0].patch + 1, g_target_fps);
-    fps_sites[0].patch[5] = 0x90;
+    b->fps[0].name = "fps_writer1";
+    b->fps[0].rva = SITE1_RVA;
+    b->fps[0].len = SITE1_LEN;
+    b->fps[0].ctx = SITE1_CTX;
+    b->fps[0].patch[0] = 0xb8;
+    put32le(b->fps[0].patch + 1, g_target_fps);
+    b->fps[0].patch[5] = 0x90;
 
-    fps_sites[1].name = "fps_writer2";
-    fps_sites[1].rva = SITE2_RVA;
-    fps_sites[1].len = SITE2_LEN;
-    fps_sites[1].ctx = SITE2_CTX;
-    fps_sites[1].patch[0] = 0xb8;
-    put32le(fps_sites[1].patch + 1, g_target_fps);
-    fps_sites[1].patch[5] = 0x66;
-    fps_sites[1].patch[6] = 0x90;
+    b->fps[1].name = "fps_writer2";
+    b->fps[1].rva = SITE2_RVA;
+    b->fps[1].len = SITE2_LEN;
+    b->fps[1].ctx = SITE2_CTX;
+    b->fps[1].patch[0] = 0xb8;
+    put32le(b->fps[1].patch + 1, g_target_fps);
+    b->fps[1].patch[5] = 0x66;
+    b->fps[1].patch[6] = 0x90;
 
-    /* Build fwTimer floor patches (prevents game speed-up above 30 FPS):
+    /* fwTimer floor patches (prevents game speed-up above 30 FPS):
      *   0x3f73ecd (6B): mov eax, 3000; nop -> 1/3000s (0x39aec33e)
      *   0x41ec831 (8B): nop*8 -> prevent overwriting 0xabab4a0 later */
-    memset(&timestep_site, 0, sizeof(timestep_site));
-    timestep_site.name = "fwtimer_floor";
-    timestep_site.rva = TIMESTEP_RVA;
-    timestep_site.len = TIMESTEP_LEN;
-    timestep_site.ctx = TIMESTEP_CTX;
-    timestep_site.patch[0] = 0xb8;
-    put32le(timestep_site.patch + 1, 3000u);
-    timestep_site.patch[5] = 0x90;
+    b->timestep.name = "fwtimer_floor";
+    b->timestep.rva = TIMESTEP_RVA;
+    b->timestep.len = TIMESTEP_LEN;
+    b->timestep.ctx = TIMESTEP_CTX;
+    b->timestep.patch[0] = 0xb8;
+    put32le(b->timestep.patch + 1, 3000u);
+    b->timestep.patch[5] = 0x90;
 
-    memset(&timestep2_site, 0, sizeof(timestep2_site));
-    timestep2_site.name = "fwtimer_floor2";
-    timestep2_site.rva = TIMESTEP2_RVA;
-    timestep2_site.len = TIMESTEP2_LEN;
-    timestep2_site.ctx = TIMESTEP2_CTX;
-    memset(timestep2_site.patch, 0x90, TIMESTEP2_LEN);
+    b->timestep2.name = "fwtimer_floor2";
+    b->timestep2.rva = TIMESTEP2_RVA;
+    b->timestep2.len = TIMESTEP2_LEN;
+    b->timestep2.ctx = TIMESTEP2_CTX;
+    memset(b->timestep2.patch, 0x90, TIMESTEP2_LEN);
 
-    /* Build TAA2U::Update() 18-byte replacement:
+    /* TAA2U::Update() 18-byte replacement:
      *   b8 <float32>         mov eax, <res_pct / 100.0f>
      *   89 87 90 00 00 00    mov dword ptr [rdi + 0x90], eax
      *   89 87 94 00 00 00    mov dword ptr [rdi + 0x94], eax
      *   c3                   ret */
-    memset(&taa2u_site, 0, sizeof(taa2u_site));
-    taa2u_site.name = "taa2u_scale";
-    taa2u_site.rva = TAA2U_RVA;
-    taa2u_site.len = TAA2U_LEN;
-    taa2u_site.ctx = TAA2U_CTX;
+    b->taa2u.name = "taa2u_scale";
+    b->taa2u.rva = TAA2U_RVA;
+    b->taa2u.len = TAA2U_LEN;
+    b->taa2u.ctx = TAA2U_CTX;
     if (g_res_pct > 0) {
         static const uint8_t store_ret[13] = {
             0x89,0x87,0x90,0x00,0x00,0x00,
@@ -688,93 +687,56 @@ int main(void) {
             0xc3
         };
         float scale_f = (float)g_res_pct / 100.0f;
-        taa2u_site.patch[0] = 0xb8;
-        put32le(taa2u_site.patch + 1, float_bits(scale_f));
-        memcpy(taa2u_site.patch + 5, store_ret, sizeof(store_ret));
+        b->taa2u.patch[0] = 0xb8;
+        put32le(b->taa2u.patch + 1, float_bits(scale_f));
+        memcpy(b->taa2u.patch + 5, store_ret, sizeof(store_ret));
     }
 
-    /* Build RT Reflections runtime disable patch (0x149dd26, 6B):
+    /* RT Reflections runtime disable patch (0x149dd26, 6B):
      *   31 c0 90 90 90 90   xor eax, eax; nop*4
      * Keeps 0xb3f3dd4 = 1 (all render target buffers allocated, no NULL crash)
      * while zeroing per-frame runtime flag 0xb3f3e90 to skip sr_tracing/denoising. */
-    memset(&rt_refl_site, 0, sizeof(rt_refl_site));
-    rt_refl_site.name = "rt_reflections_off";
-    rt_refl_site.rva = RT_REFL_RVA;
-    rt_refl_site.len = RT_REFL_LEN;
-    rt_refl_site.ctx = RT_REFL_CTX;
-    rt_refl_site.patch[0] = 0x31;
-    rt_refl_site.patch[1] = 0xc0;
-    rt_refl_site.patch[2] = 0x90;
-    rt_refl_site.patch[3] = 0x90;
-    rt_refl_site.patch[4] = 0x90;
-    rt_refl_site.patch[5] = 0x90;
+    b->rt_refl.name = "rt_reflections_off";
+    b->rt_refl.rva = RT_REFL_RVA;
+    b->rt_refl.len = RT_REFL_LEN;
+    b->rt_refl.ctx = RT_REFL_CTX;
+    b->rt_refl.patch[0] = 0x31;
+    b->rt_refl.patch[1] = 0xc0;
+    b->rt_refl.patch[2] = 0x90;
+    b->rt_refl.patch[3] = 0x90;
+    b->rt_refl.patch[4] = 0x90;
+    b->rt_refl.patch[5] = 0x90;
+}
 
-    if (g_res_pct > 0)
-        notify("ready (Res %u%%%s). Start GTAVI within 10 min.",
-               g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
-    else
-        notify("ready (Res stock%s). Start GTAVI within 10 min.",
-               g_rt_refl ? "" : ", RT Refl OFF");
+static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_open,
+                               const struct patch_bundle *b) {
+    uint64_t base = 0;
+    int already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
+    int taa2u_applied = 0, taa2u_alr = 0;
+    int rt_refl_applied = 0, rt_refl_alr = 0;
+    unsigned long found_ms = elapsed_ms();
+    int match;
 
-    for (poll = 0; poll < WAIT_POLLS; poll++) {
-        if (list_eboot_procs(procs, &proc_n)) {
-            if (++fails > LIST_TRIES) {
-                notify("couldn't list running apps. Nothing changed.");
-                return finish(EXIT_NO_PROC_LIST);
-            }
-            sleep(1);
-            continue;
-        }
-        fails = 0;
-        for (i = 0; i < proc_n; i++) {
-            if (is_skipped_pid(skipped, skipped_n, procs[i].pid))
-                continue;
-            if (!is_wanted_title(procs[i].titleid)) {
-                logmsg("INFO", "skipping %s (pid %u)", procs[i].titleid,
-                       procs[i].pid);
-                add_skipped_pid(skipped, &skipped_n, procs[i].pid);
-                continue;
-            }
-            pid = procs[i].pid;
-            strcpy(titleid, procs[i].titleid);
-            already_open = (poll == 0);
-            break;
-        }
-        if (pid)
-            break;
-        if (poll && poll % 300u == 0)
-            logmsg("INFO", "still waiting for GTAVI (%u s)", poll / 10u);
-        usleep(POLL_USEC);
-    }
-
-    if (!pid) {
-        notify("GTAVI was not started within 10 min. Closed.");
-        return finish(EXIT_NO_GAME);
-    }
-
-    found_ms = elapsed_ms();
     logmsg("OK", "found %s pid %u%s, verifying eboot...", titleid, pid,
            already_open ? " (already open)" : "");
 
-    {
-        int match = verify_gtavi_process(pid, fps_sites, &base);
-        if (match == 0) {
-            notify("%s eboot bytes do not match supported build. Nothing changed.",
-                   titleid);
-            return finish(EXIT_NO_TARGET);
-        }
-        if (match < 0 || !base) {
-            notify("couldn't read %s memory. Nothing changed.", titleid);
-            return finish(EXIT_NO_TARGET);
-        }
+    match = verify_gtavi_process(pid, b->fps, &base);
+    if (match == 0) {
+        notify("%s eboot bytes do not match supported build. Nothing changed.",
+               titleid);
+        return EXIT_NO_TARGET;
+    }
+    if (match < 0 || !base) {
+        notify("couldn't read %s memory. Nothing changed.", titleid);
+        return EXIT_NO_TARGET;
     }
     logmsg("OK", "GTAVI verified: %s pid %u base 0x%llx", titleid, pid,
            (unsigned long long)base);
 
     /* Patch TAA2U::Update() first so it beats render target creation */
     if (g_res_pct > 0) {
-        if (verify_site(pid, base, &taa2u_site) == 1) {
-            if (!apply_site(pid, base, &taa2u_site, &taa2u_alr))
+        if (verify_site(pid, base, &b->taa2u) == 1) {
+            if (!apply_site(pid, base, &b->taa2u, &taa2u_alr))
                 taa2u_applied = 1;
             else
                 logmsg("WARN", "TAA2U scale write failed; continuing with FPS unlock");
@@ -783,29 +745,29 @@ int main(void) {
         }
     }
 
-    if (apply_site(pid, base, &fps_sites[0], &already1) ||
-        apply_site(pid, base, &fps_sites[1], &already2)) {
+    if (apply_site(pid, base, &b->fps[0], &already1) ||
+        apply_site(pid, base, &b->fps[1], &already2)) {
         notify("write failed. Restart GTAVI and check %s", LOG_PATH);
-        return finish(EXIT_WRITE_FAIL);
+        return EXIT_WRITE_FAIL;
     }
 
-    if (verify_site(pid, base, &timestep_site) == 1) {
-        if (apply_site(pid, base, &timestep_site, &already_ts))
+    if (verify_site(pid, base, &b->timestep) == 1) {
+        if (apply_site(pid, base, &b->timestep, &already_ts))
             logmsg("WARN", "fwTimer floor code patch failed; relying on RAM write");
     } else {
         logmsg("WARN", "fwTimer floor context mismatch");
     }
 
-    if (verify_site(pid, base, &timestep2_site) == 1) {
-        if (apply_site(pid, base, &timestep2_site, &already_ts2))
+    if (verify_site(pid, base, &b->timestep2) == 1) {
+        if (apply_site(pid, base, &b->timestep2, &already_ts2))
             logmsg("WARN", "fwTimer floor2 patch failed");
     } else {
         logmsg("WARN", "fwTimer floor2 context mismatch");
     }
 
     if (!g_rt_refl) {
-        if (verify_site(pid, base, &rt_refl_site) == 1) {
-            if (!apply_site(pid, base, &rt_refl_site, &rt_refl_alr))
+        if (verify_site(pid, base, &b->rt_refl) == 1) {
+            if (!apply_site(pid, base, &b->rt_refl, &rt_refl_alr))
                 rt_refl_applied = 1;
             else
                 logmsg("WARN", "RT Reflections disable write failed");
@@ -829,5 +791,123 @@ int main(void) {
                rt_refl_applied ? ", RT Refl OFF" : "");
     }
 
-    return finish(EXIT_OK);
+    return EXIT_OK;
+}
+
+int main(void) {
+    struct patch_bundle patches;
+    struct eboot_proc procs[MAX_EBOOTS];
+    uint32_t skipped[MAX_EBOOTS];
+    unsigned skipped_n = 0, proc_n = 0, i;
+    uint32_t patched_pid = 0;
+    unsigned poll = 0, fails = 0;
+    int first_session = 1;
+
+    clock_gettime(CLOCK_MONOTONIC, &g_t0);
+#ifndef HOST_TEST
+    syscall(SYS_thr_set_name, -1, PROC_NAME);
+#endif
+
+    if (lock_instance()) {
+        notify("already running, this copy exits");
+        return EXIT_ALREADY_RUNNING;
+    }
+    log_open();
+    load_settings();
+    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, rt_reflections=%u, daemon=%u)",
+           TOOL_VERSION, g_target_fps, g_res_pct, g_rt_refl, g_daemon);
+#ifndef HOST_TEST
+    logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
+           (kernel_get_fw_version() >> 16) & 0xff);
+#endif
+
+    build_patches(&patches);
+
+    if (g_daemon) {
+        if (g_res_pct > 0)
+            notify("ready (Res %u%%%s, daemon). Waiting for GTAVI.",
+                   g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
+        else
+            notify("ready (Res stock%s, daemon). Waiting for GTAVI.",
+                   g_rt_refl ? "" : ", RT Refl OFF");
+    } else {
+        if (g_res_pct > 0)
+            notify("ready (Res %u%%%s). Start GTAVI within 10 min.",
+                   g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
+        else
+            notify("ready (Res stock%s). Start GTAVI within 10 min.",
+                   g_rt_refl ? "" : ", RT Refl OFF");
+    }
+
+    for (poll = 0; g_daemon || poll < WAIT_POLLS; poll++) {
+        uint32_t pid = 0;
+        char titleid[16] = "?";
+
+        if (list_eboot_procs(procs, &proc_n)) {
+            if (!g_daemon && ++fails > LIST_TRIES) {
+                notify("couldn't list running apps. Nothing changed.");
+                return finish(EXIT_NO_PROC_LIST);
+            }
+            sleep(1);
+            continue;
+        }
+        fails = 0;
+
+        /* In daemon mode, sleep gently while the already-patched GTAVI session is alive */
+        if (patched_pid) {
+            int alive = 0;
+            for (i = 0; i < proc_n; i++) {
+                if (procs[i].pid == patched_pid) {
+                    alive = 1;
+                    break;
+                }
+            }
+            if (alive) {
+                usleep(IDLE_POLL_USEC);
+                continue;
+            }
+            logmsg("INFO", "GTAVI pid %u exited, waiting for next launch", patched_pid);
+            patched_pid = 0;
+            skipped_n = 0;
+            poll = 0;
+        }
+
+        for (i = 0; i < proc_n; i++) {
+            if (is_skipped_pid(skipped, skipped_n, procs[i].pid))
+                continue;
+            if (!is_wanted_title(procs[i].titleid)) {
+                logmsg("INFO", "skipping %s (pid %u)", procs[i].titleid,
+                       procs[i].pid);
+                add_skipped_pid(skipped, &skipped_n, procs[i].pid);
+                continue;
+            }
+            pid = procs[i].pid;
+            strcpy(titleid, procs[i].titleid);
+            break;
+        }
+
+        if (pid) {
+            int rc;
+            if (!first_session) {
+                load_settings();
+                build_patches(&patches);
+                logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, rt_reflections=%u, daemon=%u)",
+                       g_target_fps, g_res_pct, g_rt_refl, g_daemon);
+            }
+            rc = patch_gtavi_session(pid, titleid, first_session && poll == 0, &patches);
+            first_session = 0;
+            if (!g_daemon)
+                return finish(rc);
+            patched_pid = pid;
+            usleep(IDLE_POLL_USEC);
+            continue;
+        }
+
+        if (!g_daemon && poll && poll % 300u == 0)
+            logmsg("INFO", "still waiting for GTAVI (%u s)", poll / 10u);
+        usleep(POLL_USEC);
+    }
+
+    notify("GTAVI was not started within 10 min. Closed.");
+    return finish(EXIT_NO_GAME);
 }

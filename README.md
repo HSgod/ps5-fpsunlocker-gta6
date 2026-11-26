@@ -13,7 +13,7 @@ Grab the latest prebuilt `.elf` directly from [**Releases**](https://github.com/
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.12.elf` through your Payload Manager (PLDMGR / `elfldr`).
+1. Load `GTAVI UnlockFPS_v1.13.elf` through your Payload Manager (PLDMGR / `elfldr`).
 2. A PS5 notification will appear confirming the payload is ready and **waiting up to 10 minutes** for GTAVI (`PPSA01547` / `PPSA29660` / `PPSA38500`) to launch.
 3. Start GTAVI *(load the payload **before** starting the game so the `TAA2U` resolution scale applies before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and exits automatically.
@@ -35,14 +35,17 @@ On first run, the payload creates `/data/gtavi-unlockfps/fps.txt`:
 fps=60
 res_pct=50
 rt_reflections=1
+daemon=0
 ```
 
-Edit over FTP without rebuilding:
+Edit over FTP without rebuilding (out-of-range values are logged and fall back to their defaults):
 * **`fps`**: target FPS cap (`30`–`120`, default `60`).
-* **`res_pct`**: internal `TAA2U` render resolution as a percentage of 4K output (`0` = stock `67%` / `1440p`, or `50`–`100`):
+* **`res_pct`**: internal `TAA2U` render resolution as a percentage of 4K output (`0` = stock `67%` / `1440p`, or `25`–`100`):
   * `67` = stock (`2560×1440`)
   * `50` = **`1920×1080`** *(default — ~44% fewer pixels than stock, keeps stock graphics quality)*
+  * `25`–`49` = *experimental* (e.g. `33` ≈ `720p`; softer image / more `TAA2U` shimmering)
 * **`rt_reflections`**: runtime Ray-Traced Reflections toggle (`1` = stock ON *(default)*, `0` = OFF *(experimental — +3–4 FPS, may cause ocean/water visual glitches)*).
+* **`daemon`**: background mode (`0` = one-shot, waits up to 10 min and exits *(default)*; `1` = stays running in the background after jailbreak, reloads `fps.txt` and automatically re-patches GTAVI across game restarts).
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
@@ -68,7 +71,7 @@ RVAs relative to `eboot.bin` map base (with `+0x400000` static base addresses in
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.12.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.13.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh
