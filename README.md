@@ -42,12 +42,13 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 
 | `res_pct` | Internal Resolution | Notes |
 | --- | --- | --- |
-| `100` | `3840×2160` *(Native 4K)* | **Experimental** — 2.25× more pixels than stock 1440p; very heavy on GPU and VRAM (may hit low FPS or OOM on base PS5; `75`–`85` is safer for ultra-sharp screenshots or PS5 Pro at 30 FPS). |
-| `67` *(or `0`)* | `2560×1440` | **Stock PS5** internal resolution. |
-| `60` | `2304×1296` | Sharper middle ground between 1080p and 1440p. |
-| `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p. |
-| **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than stock, keeps all other graphics settings 100% stock. |
-| `25`–`49` | `960×540` – `1881×1058` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more `TAA2U` shimmering). |
+| `100` | `3840×2160` *(Native 4K)* | **Experimental** — 2.25× more pixels than stock 1440p; very heavy on GPU and VRAM (may hit low FPS or render-target pool OOM). |
+| `67` | `2560×1440` | **Stock PS5 Fat/Slim** (`TAA2U`). **Do not use on PS5 Pro** — exceeds Pro's transient RT pool (`0x08930da7` crash on boot); use `0` for stock PS5 Pro (`2240×1260`). |
+| `60` | `2304×1296` | Sharper middle ground (safe upper limit tested on **PS5 Pro** PSSR). |
+| `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |
+| **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than base PS5 stock, keeps all other graphics settings 100% stock. |
+| `25`–`49` | `960×540` – `1881×1058` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more upscaling shimmering). |
+| `0` | Stock (`2560×1440` PS5 / `2240×1260` Pro) | Leaves internal resolution completely untouched. |
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
