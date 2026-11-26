@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.8"
+#define TOOL_VERSION "1.9"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -50,25 +50,29 @@
 
 /* ---------------------------------------------------------------- config */
 
-#define WANT_TITLE_ID   "PPSA38500"
+static const char *const WANT_TITLE_IDS[] = {
+    "PPSA01547", "PPSA29660", "PPSA38500"
+};
 
 #define DEFAULT_FPS     60u
 #define MIN_FPS         30u
 #define MAX_FPS         120u
 
 /* Internal TAA2U render resolution percentage of output (stock PS5 = 67% / 1440p).
- * 0 = stock (untouched), 25..100 = custom percent (e.g. 50 = 1080p on 4K). */
+ * 0 = stock (untouched), 50..100 = custom percent (default 50 = 1080p on 4K). */
 #define DEFAULT_RES_PCT 50u
-#define MIN_RES_PCT     25u
+#define MIN_RES_PCT     50u
 #define MAX_RES_PCT     100u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
-#define SITE1_RVA    0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
-#define SITE1_LEN    6u
-#define SITE2_RVA    0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
-#define SITE2_LEN    7u
-#define TIMESTEP_RVA 0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
-#define TIMESTEP_LEN 6u
+#define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
+#define SITE1_LEN     6u
+#define SITE2_RVA     0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
+#define SITE2_LEN     7u
+#define TIMESTEP_RVA  0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
+#define TIMESTEP_LEN  6u
+#define TIMESTEP2_RVA 0x41ec831u /* vmovss [0xabab4a0], xmm0          (8 bytes)  */
+#define TIMESTEP2_LEN 8u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -107,6 +111,14 @@ static const uint8_t TIMESTEP_CTX[64] = {
     0x50,0x4c,0x39,0xf9,0x0f,0x85,0x70,0x08,0x00,0x00,0x48,0x05,0x08,0x08,0x00,0x00,
     0x8b,0x80,0x14,0x06,0x00,0x00,0xc4,0xe1,0xda,0x2a,0xc0,0xc5,0xfa,0x10,0x0d,0xfc,
     0x63,0xd0,0x05,0x31,0xc9,0xba,0x80,0x00,0x00,0x00,0xc5,0xf2,0x5e,0xc0,0xc5,0xfa
+};
+
+/* 64 bytes of the clean GTAVI eboot around second TIMESTEP writer (site at +32, len 8): */
+static const uint8_t TIMESTEP2_CTX[64] = {
+    0x05,0xde,0xbe,0x56,0x0a,0x10,0x00,0x00,0x00,0x48,0x85,0xdb,0x48,0xb9,0xcd,0xcc,
+    0x4c,0x3d,0x32,0x00,0x00,0x00,0xc7,0x05,0x6b,0xec,0x9b,0x06,0x3e,0xc3,0xae,0x39,
+    0xc5,0xfa,0x11,0x05,0x67,0xec,0x9b,0x06,0xba,0x08,0x00,0x00,0x00,0x48,0x8b,0x3d,
+    0xa3,0xbe,0x56,0x0a,0x0f,0x94,0x05,0x64,0xbe,0x56,0x0a,0x31,0xc0,0x48,0x8b,0x35
 };
 
 /* 64 bytes of the clean GTAVI eboot around TAA2U::Update (site at +32, len 18): */
@@ -495,10 +507,11 @@ static void update_live_globals(uint32_t pid, uint64_t base) {
     uint8_t buf[4];
     uint8_t floor_buf[4];
 
-    put32le(floor_buf, float_bits(0.001f));
+    /* Set fwTimer min/target frame floor to 1/3000s (0x39aec33e, native RAGE value) */
+    put32le(floor_buf, 0x39aec33eu);
     if (!proc_write(pid, base + G_MIN_FRAME_SEC_RVA, floor_buf, 4) &&
         !proc_write(pid, base + G_TARGET_FRAME_SEC_RVA, floor_buf, 4)) {
-        logmsg("OK", "updated fwTimer min/target frame floor to 0.001s (1.0x speed)");
+        logmsg("OK", "updated fwTimer min/target frame floor to 1/3000s (1.0x speed)");
     } else {
         logmsg("WARN", "could not update fwTimer floor globals");
     }
@@ -532,6 +545,14 @@ static void add_skipped_pid(uint32_t *skipped, unsigned *n, uint32_t pid) {
         skipped[(*n)++] = pid;
 }
 
+static int is_wanted_title(const char *tid) {
+    size_t i;
+    for (i = 0; i < sizeof(WANT_TITLE_IDS) / sizeof(WANT_TITLE_IDS[0]); i++)
+        if (!strcmp(tid, WANT_TITLE_IDS[i]))
+            return 1;
+    return 0;
+}
+
 static int finish(int code) {
     logmsg("INFO", "exit code %d", code);
     if (g_lock >= 0)
@@ -544,6 +565,7 @@ static int finish(int code) {
 int main(void) {
     struct patch_site fps_sites[2];
     struct patch_site timestep_site;
+    struct patch_site timestep2_site;
     struct patch_site taa2u_site;
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
@@ -552,7 +574,7 @@ int main(void) {
     uint64_t base = 0;
     char titleid[16] = "?";
     unsigned poll, fails = 0;
-    int already_open = 0, already1 = 0, already2 = 0, already_ts = 0;
+    int already_open = 0, already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
     unsigned long found_ms;
 
@@ -595,16 +617,24 @@ int main(void) {
     fps_sites[1].patch[5] = 0x66;
     fps_sites[1].patch[6] = 0x90;
 
-    /* Build fwTimer floor patch (prevents game speed-up above 30 FPS):
-     *   0x3f73ecd (6B): mov eax, 1000; nop -> sets 1.0f/1000.0f = 1ms floor */
+    /* Build fwTimer floor patches (prevents game speed-up above 30 FPS):
+     *   0x3f73ecd (6B): mov eax, 3000; nop -> 1/3000s (0x39aec33e)
+     *   0x41ec831 (8B): nop*8 -> prevent overwriting 0xabab4a0 later */
     memset(&timestep_site, 0, sizeof(timestep_site));
     timestep_site.name = "fwtimer_floor";
     timestep_site.rva = TIMESTEP_RVA;
     timestep_site.len = TIMESTEP_LEN;
     timestep_site.ctx = TIMESTEP_CTX;
     timestep_site.patch[0] = 0xb8;
-    put32le(timestep_site.patch + 1, 1000u);
+    put32le(timestep_site.patch + 1, 3000u);
     timestep_site.patch[5] = 0x90;
+
+    memset(&timestep2_site, 0, sizeof(timestep2_site));
+    timestep2_site.name = "fwtimer_floor2";
+    timestep2_site.rva = TIMESTEP2_RVA;
+    timestep2_site.len = TIMESTEP2_LEN;
+    timestep2_site.ctx = TIMESTEP2_CTX;
+    memset(timestep2_site.patch, 0x90, TIMESTEP2_LEN);
 
     /* Build TAA2U::Update() 18-byte replacement:
      *   b8 <float32>         mov eax, <res_pct / 100.0f>
@@ -629,11 +659,11 @@ int main(void) {
     }
 
     if (g_res_pct > 0)
-        notify("ready (FPS: %u, Res: %u%%). Start GTAVI (%s) within 10 min.",
-               g_target_fps, g_res_pct, WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: %u%%). Start GTAVI within 10 min.",
+               g_target_fps, g_res_pct);
     else
-        notify("ready (FPS: %u, Res: stock). Start GTAVI (%s) within 10 min.",
-               g_target_fps, WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: stock). Start GTAVI within 10 min.",
+               g_target_fps);
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -648,7 +678,7 @@ int main(void) {
         for (i = 0; i < proc_n; i++) {
             if (is_skipped_pid(skipped, skipped_n, procs[i].pid))
                 continue;
-            if (strcmp(procs[i].titleid, WANT_TITLE_ID)) {
+            if (!is_wanted_title(procs[i].titleid)) {
                 logmsg("INFO", "skipping %s (pid %u)", procs[i].titleid,
                        procs[i].pid);
                 add_skipped_pid(skipped, &skipped_n, procs[i].pid);
@@ -662,13 +692,12 @@ int main(void) {
         if (pid)
             break;
         if (poll && poll % 300u == 0)
-            logmsg("INFO", "still waiting for %s (%u s)", WANT_TITLE_ID,
-                   poll / 10u);
+            logmsg("INFO", "still waiting for GTAVI (%u s)", poll / 10u);
         usleep(POLL_USEC);
     }
 
     if (!pid) {
-        notify("GTAVI (%s) was not started within 10 min. Closed.", WANT_TITLE_ID);
+        notify("GTAVI was not started within 10 min. Closed.");
         return finish(EXIT_NO_GAME);
     }
 
@@ -714,6 +743,13 @@ int main(void) {
             logmsg("WARN", "fwTimer floor code patch failed; relying on RAM write");
     } else {
         logmsg("WARN", "fwTimer floor context mismatch");
+    }
+
+    if (verify_site(pid, base, &timestep2_site) == 1) {
+        if (apply_site(pid, base, &timestep2_site, &already_ts2))
+            logmsg("WARN", "fwTimer floor2 patch failed");
+    } else {
+        logmsg("WARN", "fwTimer floor2 context mismatch");
     }
 
     update_live_globals(pid, base);

@@ -5,7 +5,7 @@ A lightweight, one-shot `.elf` runtime payload for jailbroken **PlayStation 5** 
 ## Requirements
 
 * Jailbroken PlayStation 5
-* **Grand Theft Auto VI (`PPSA38500`)**
+* **Grand Theft Auto VI (`PPSA01547`, `PPSA29660`, `PPSA38500` — v01.002.001)**
 
 ## Download
 
@@ -13,8 +13,8 @@ Grab the latest prebuilt `.elf` directly from [**Releases**](https://github.com/
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.8.elf` through your Payload Manager (PLDMGR / `elfldr`).
-2. A PS5 notification will appear confirming the payload is ready and **waiting up to 10 minutes** for `PPSA38500` to launch.
+1. Load `GTAVI UnlockFPS_v1.9.elf` through your Payload Manager (PLDMGR / `elfldr`).
+2. A PS5 notification will appear confirming the payload is ready and **waiting up to 10 minutes** for GTAVI (`PPSA01547` / `PPSA29660` / `PPSA38500`) to launch.
 3. Start GTAVI *(load the payload **before** starting the game so the `TAA2U` resolution scale applies before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and exits automatically.
 
@@ -37,12 +37,9 @@ res_pct=50
 
 Edit over FTP without rebuilding:
 * **`fps`**: target FPS cap (`30`–`120`, default `60`).
-* **`res_pct`**: internal `TAA2U` render resolution as a percentage of 4K output (`0` = stock `67%` / `1440p`, or `25`–`100`):
+* **`res_pct`**: internal `TAA2U` render resolution as a percentage of 4K output (`0` = stock `67%` / `1440p`, or `50`–`100`):
   * `67` = stock (`2560×1440`)
   * `50` = **`1920×1080`** *(default — ~44% fewer pixels than stock, keeps stock graphics quality)*
-  * `45` = `1728×972`
-  * `40` = `1536×864`
-  * `33` = `1280×720`
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
@@ -53,7 +50,7 @@ Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.8.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.9.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh
