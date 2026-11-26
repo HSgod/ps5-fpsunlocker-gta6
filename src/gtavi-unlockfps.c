@@ -39,7 +39,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.4"
+#define TOOL_VERSION "1.5"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -58,7 +58,8 @@
 #define DEFAULT_RES_PCT   50u
 #define MIN_RES_PCT       25u
 #define MAX_RES_PCT       100u
-#define DEFAULT_PERF_MODE 1u /* 1 = Low shadows/volumetrics/LOD/foliage in ApplySettings */
+#define DEFAULT_PERF_MODE 2u /* 0=stock, 1=4 Low presets, 2=9 Low presets (Ultra Perf) */
+#define MAX_PERF_MODE     2u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA       0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -68,15 +69,26 @@
 #define TIMESTEP_RVA    0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
 #define TIMESTEP_LEN    6u
 
-/* ApplySettings engine-native Low quality overrides (perf_mode=1): */
+/* ApplySettings engine-native Low quality overrides (perf_mode=1..2): */
 #define SHADOW_QUAL_RVA 0x3f7431eu /* mov edi, [rbx + 0xc94]            (6 bytes)  */
 #define SHADOW_QUAL_LEN 6u
 #define VOL_SAMPLES_RVA 0x3f74350u /* mov eax, [rax + 0x568]            (6 bytes)  */
 #define VOL_SAMPLES_LEN 6u
 #define LOD_DIST_RVA    0x3f74389u /* vmovss xmm0, [rbx + 0xdd8]        (8 bytes)  */
 #define LOD_DIST_LEN    8u
-#define FOLIAGE_BUD_RVA 0x3f74467u /* mov edx, [rbx + 0xc74]            (6 bytes)  */
+#define FOLIAGE_BUD_RVA 0x3f74467u /* mov edx,[rbx+0xc74] (+mov eax,[rbx+0xce4])   */
 #define FOLIAGE_BUD_LEN 6u
+#define FOLIAGE_BOTH_LEN 12u       /* perf_mode=2: both 0x3f74467 & 0x3f7446d      */
+
+/* Extra ApplySettings Low overrides enabled in perf_mode=2: */
+#define GRID_HALF_RVA   0x3f73f11u /* cmp dword ptr [rbx + 0xc88], 0    (7 bytes)  */
+#define GRID_HALF_LEN   7u
+#define FX_QUALITY_RVA  0x3f7420eu /* mov eax, [rbx + 0xd8c]            (6 bytes)  */
+#define FX_QUALITY_LEN  6u
+#define SLIDER_CD0_RVA  0x3f743e6u /* vmovss xmm0, [rbx + 0xcd0]        (8 bytes)  */
+#define SLIDER_CD0_LEN  8u
+#define SHADOW_RES_RVA  0x3f74417u /* mov eax, [rbx + 0xc64]            (6 bytes)  */
+#define SHADOW_RES_LEN  6u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -141,6 +153,30 @@ static const uint8_t FOLIAGE_BUD_CTX[64] = {
     0xb9,0x54,0x9a,0x06,0x8b,0x83,0x80,0x0d,0x00,0x00,0x89,0x05,0xc5,0x02,0xf1,0x07,
     0x8b,0x93,0x74,0x0c,0x00,0x00,0x8b,0x83,0xe4,0x0c,0x00,0x00,0x8d,0x4a,0xff,0x83,
     0xf9,0x03,0x73,0x46,0x89,0xca,0x4c,0x8d,0x05,0x34,0x1f,0xf3,0x05,0x48,0x8d,0x35
+};
+static const uint8_t GRID_HALF_CTX[64] = {
+    0xff,0xff,0xc5,0xfa,0x11,0x05,0xa5,0x75,0xc3,0x06,0x0f,0xb6,0x83,0x18,0x0e,0x00,
+    0x00,0x83,0xc8,0x02,0x89,0x05,0xb9,0x7b,0x84,0x0a,0x8b,0x05,0xbf,0xe3,0xf5,0x07,
+    0x83,0xbb,0x88,0x0c,0x00,0x00,0x00,0xc6,0x05,0xcd,0x17,0xf6,0x07,0x01,0x0f,0x9f,
+    0xc1,0xc4,0xe2,0x71,0xf7,0xd2,0x8d,0x71,0x07,0x89,0x0d,0xa0,0xe3,0xf5,0x07,0x89
+};
+static const uint8_t FX_QUALITY_CTX[64] = {
+    0x00,0x85,0xc0,0x0f,0x4e,0xc8,0x0f,0x9e,0x05,0xdd,0x21,0xf1,0x07,0x3b,0x0d,0x17,
+    0x79,0x11,0x08,0x89,0x0d,0x11,0x79,0x11,0x08,0x0f,0x95,0x05,0x0e,0x79,0x11,0x08,
+    0x8b,0x83,0x8c,0x0d,0x00,0x00,0x48,0x83,0xf8,0x03,0x77,0x53,0x48,0x8d,0x0d,0x2f,
+    0xc8,0xb4,0x05,0x48,0x8d,0x35,0xc8,0xc7,0xb3,0x05,0xba,0x00,0x01,0x01,0x01,0xc5
+};
+static const uint8_t SLIDER_CD0_CTX[64] = {
+    0xfa,0x10,0x0d,0x83,0x33,0xf1,0x07,0xc5,0xfa,0x10,0x15,0x7f,0x33,0xf1,0x07,0xc5,
+    0xea,0x5c,0xd1,0xc4,0xe2,0x79,0xa9,0xd1,0xc5,0xfa,0x11,0x15,0x76,0x33,0xf1,0x07,
+    0xc5,0xfa,0x10,0x83,0xd0,0x0c,0x00,0x00,0xe8,0x4d,0x53,0x4d,0x02,0x8a,0x83,0x64,
+    0x0d,0x00,0x00,0xc5,0xfa,0x10,0x05,0xb3,0x8a,0xd0,0x05,0x88,0x05,0xd6,0x19,0xf1
+};
+static const uint8_t SHADOW_RES_CTX[64] = {
+    0x00,0x00,0xc5,0xfa,0x10,0x05,0xb3,0x8a,0xd0,0x05,0x88,0x05,0xd6,0x19,0xf1,0x07,
+    0x8a,0x83,0x6d,0x0d,0x00,0x00,0xc5,0xf8,0x28,0xc8,0x88,0x05,0xd5,0x19,0xf1,0x07,
+    0x8b,0x83,0x64,0x0c,0x00,0x00,0x48,0x83,0xf8,0x03,0x77,0x0c,0x48,0x8d,0x0d,0x76,
+    0xb8,0xb3,0x05,0xc5,0xfa,0x10,0x0c,0x81,0xc5,0xfa,0x5e,0xc1,0xc4,0xe2,0x79,0x18
 };
 
 /* 64 bytes of the clean GTAVI eboot around TAA2U::Update (site at +32, len 18): */
@@ -312,7 +348,10 @@ static void load_settings(void) {
             }
         } else if (!strncmp(line, "perf_mode", 9)) {
             saw_perf_mode = 1;
-            g_perf_mode = (v != 0) ? 1u : 0u;
+            if (v >= 0 && v <= (int)MAX_PERF_MODE)
+                g_perf_mode = (uint32_t)v;
+            else
+                logmsg("WARN", "ignoring perf_mode=%d (must be 0..%u)", v, MAX_PERF_MODE);
         }
     }
     fclose(f);
@@ -591,7 +630,8 @@ int main(void) {
     struct patch_site fps_sites[2];
     struct patch_site timestep_site;
     struct patch_site taa2u_site;
-    struct patch_site perf_sites[4];
+    struct patch_site perf_sites[8];
+    unsigned perf_count = 0;
     struct eboot_proc procs[MAX_EBOOTS];
     uint32_t skipped[MAX_EBOOTS];
     unsigned skipped_n = 0, proc_n = 0, i;
@@ -675,17 +715,20 @@ int main(void) {
         memcpy(taa2u_site.patch + 5, store_ret, sizeof(store_ret));
     }
 
-    /* Build ApplySettings engine-native Low presets (perf_mode=1):
-     *   0: SHADOW_QUAL (6B): xor edi, edi; nop*4       (Low shadows, 0.5x dist)
-     *   1: VOL_SAMPLES (6B): xor eax, eax; nop*4       (2 samples instead of 7..12)
-     *   2: LOD_DIST    (8B): vxorps xmm0,xmm0,xmm0; nop*4 (min LOD/draw distance)
-     *   3: FOLIAGE_BUD (6B): xor edx, edx; nop*4       (min foliage/instance budget) */
+    /* Build ApplySettings engine-native Low presets:
+     *   perf_mode >= 1 (4 sites): shadows, volumetrics, LOD dist, foliage
+     *   perf_mode >= 2 (8 sites / 9 knobs): + half grid, FX quality, detail slider,
+     *                                       shadow map res 1280, particle limit */
     memset(perf_sites, 0, sizeof(perf_sites));
     {
         static const uint8_t p_edi0[6]  = {0x31,0xff,0x90,0x90,0x90,0x90};
         static const uint8_t p_eax0[6]  = {0x31,0xc0,0x90,0x90,0x90,0x90};
         static const uint8_t p_xmm0[8]  = {0xc5,0xf8,0x57,0xc0,0x90,0x90,0x90,0x90};
         static const uint8_t p_edx0[6]  = {0x31,0xd2,0x90,0x90,0x90,0x90};
+        static const uint8_t p_both[12] = {0x31,0xd2,0x90,0x90,0x90,0x90,
+                                           0x31,0xc0,0x90,0x90,0x90,0x90};
+        static const uint8_t p_grid[7]  = {0x39,0xc0,0x90,0x90,0x90,0x90,0x90};
+        static const uint8_t p_eax1[6]  = {0xb8,0x01,0x00,0x00,0x00,0x90};
 
         perf_sites[0].name = "shadow_qual";
         perf_sites[0].rva = SHADOW_QUAL_RVA;
@@ -705,19 +748,46 @@ int main(void) {
         perf_sites[2].ctx = LOD_DIST_CTX;
         memcpy(perf_sites[2].patch, p_xmm0, 8);
 
-        perf_sites[3].name = "foliage_bud";
+        perf_sites[3].name = (g_perf_mode >= 2) ? "foliage+particles" : "foliage_bud";
         perf_sites[3].rva = FOLIAGE_BUD_RVA;
-        perf_sites[3].len = FOLIAGE_BUD_LEN;
+        perf_sites[3].len = (g_perf_mode >= 2) ? FOLIAGE_BOTH_LEN : FOLIAGE_BUD_LEN;
         perf_sites[3].ctx = FOLIAGE_BUD_CTX;
-        memcpy(perf_sites[3].patch, p_edx0, 6);
+        memcpy(perf_sites[3].patch, (g_perf_mode >= 2) ? p_both : p_edx0,
+               perf_sites[3].len);
+
+        perf_sites[4].name = "grid_half";
+        perf_sites[4].rva = GRID_HALF_RVA;
+        perf_sites[4].len = GRID_HALF_LEN;
+        perf_sites[4].ctx = GRID_HALF_CTX;
+        memcpy(perf_sites[4].patch, p_grid, 7);
+
+        perf_sites[5].name = "fx_quality";
+        perf_sites[5].rva = FX_QUALITY_RVA;
+        perf_sites[5].len = FX_QUALITY_LEN;
+        perf_sites[5].ctx = FX_QUALITY_CTX;
+        memcpy(perf_sites[5].patch, p_eax0, 6);
+
+        perf_sites[6].name = "detail_slider";
+        perf_sites[6].rva = SLIDER_CD0_RVA;
+        perf_sites[6].len = SLIDER_CD0_LEN;
+        perf_sites[6].ctx = SLIDER_CD0_CTX;
+        memcpy(perf_sites[6].patch, p_xmm0, 8);
+
+        perf_sites[7].name = "shadow_res";
+        perf_sites[7].rva = SHADOW_RES_RVA;
+        perf_sites[7].len = SHADOW_RES_LEN;
+        perf_sites[7].ctx = SHADOW_RES_CTX;
+        memcpy(perf_sites[7].patch, p_eax1, 6);
+
+        perf_count = (g_perf_mode >= 2) ? 8u : (g_perf_mode == 1 ? 4u : 0u);
     }
 
     if (g_res_pct > 0)
-        notify("ready (FPS: %u, Res: %u%%, Perf: %s). Start GTAVI (%s) within 10 min.",
-               g_target_fps, g_res_pct, g_perf_mode ? "ON" : "OFF", WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: %u%%, Perf: %u). Start GTAVI (%s) within 10 min.",
+               g_target_fps, g_res_pct, g_perf_mode, WANT_TITLE_ID);
     else
-        notify("ready (FPS: %u, Res: stock, Perf: %s). Start GTAVI (%s) within 10 min.",
-               g_target_fps, g_perf_mode ? "ON" : "OFF", WANT_TITLE_ID);
+        notify("ready (FPS: %u, Res: stock, Perf: %u). Start GTAVI (%s) within 10 min.",
+               g_target_fps, g_perf_mode, WANT_TITLE_ID);
 
     for (poll = 0; poll < WAIT_POLLS; poll++) {
         if (list_eboot_procs(procs, &proc_n)) {
@@ -800,8 +870,8 @@ int main(void) {
         logmsg("WARN", "fwTimer floor context mismatch");
     }
 
-    if (g_perf_mode) {
-        for (i = 0; i < 4; i++) {
+    if (perf_count > 0) {
+        for (i = 0; i < perf_count; i++) {
             int alr = 0;
             if (verify_site(pid, base, &perf_sites[i]) == 1) {
                 if (!apply_site(pid, base, &perf_sites[i], &alr))
@@ -813,18 +883,18 @@ int main(void) {
     }
 
     update_live_globals(pid, base);
-    logmsg("OK", "all patches applied in %lu ms (perf=%d/4)",
-           elapsed_ms() - found_ms, perf_applied);
+    logmsg("OK", "all patches applied in %lu ms (perf=%d/%u)",
+           elapsed_ms() - found_ms, perf_applied, perf_count);
 
     if (already1 && already2 && (!g_res_pct || taa2u_alr)) {
-        notify("already active for this session (FPS: %u, Res: %u%%, Perf: %s).",
-               g_target_fps, g_res_pct, g_perf_mode ? "ON" : "OFF");
+        notify("already active for this session (FPS: %u, Res: %u%%, Perf: %u).",
+               g_target_fps, g_res_pct, g_perf_mode);
     } else if (taa2u_applied) {
-        notify("FPS unlocked (%u) + Res %u%% + Perf %d/4 ON! Enjoy.",
-               g_target_fps, g_res_pct, perf_applied);
+        notify("FPS unlocked (%u) + Res %u%% + Perf %d/%u ON! Enjoy.",
+               g_target_fps, g_res_pct, perf_applied, perf_count);
     } else {
-        notify("FPS unlocked (%u) + Perf %d/4 ON! Enjoy.",
-               g_target_fps, perf_applied);
+        notify("FPS unlocked (%u) + Perf %d/%u ON! Enjoy.",
+               g_target_fps, perf_applied, perf_count);
     }
 
     return finish(EXIT_OK);
