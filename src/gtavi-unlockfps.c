@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.13"
+#define TOOL_VERSION "1.14"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -91,6 +91,11 @@ static const char *const WANT_TITLE_IDS[] = {
 #define TAA2U_RVA 0x62eadc0u
 #define TAA2U_LEN 18u
 
+/* PSSR::GetRenderDimensions() (vtable+0x58 of PS5 Pro upscaler 0xb3d2b70):
+ *   0x62e6bc5: overrides preset scale lookup with custom float32 -> jmp 0x62e6c07 (11 bytes) */
+#define PSSR_RVA  0x62e6bc5u
+#define PSSR_LEN  11u
+
 /* Live globals polled by SetFlipRate & fwTimer: */
 #define G_TARGET_FRAMETIME_US_RVA 0xe3be220u /* uint32_t: 1000000 / fps */
 #define G_REQUESTED_FRAMELOCK_RVA 0xe7bbb08u /* uint8_t:  0xff = auto   */
@@ -137,6 +142,15 @@ static const uint8_t TAA2U_CTX[64] = {
     0xff,0xff,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,
     0xc4,0xe2,0x79,0x18,0x05,0x23,0x0c,0x99,0x03,0xc5,0xf8,0x13,0x87,0x90,0x00,0x00,
     0x00,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc
+};
+
+/* 64 bytes of the clean GTAVI eboot around PSSR::GetRenderDimensions scale select
+ * (0x62e6bc5, site at +32, len 11): */
+static const uint8_t PSSR_CTX[64] = {
+    0x08,0x48,0x8b,0x38,0x4c,0x8b,0x4f,0x50,0x48,0x8d,0x3d,0xfc,0x4a,0xa4,0xfb,0x49,
+    0x39,0xf9,0x75,0x74,0x48,0x05,0x08,0x08,0x00,0x00,0x8b,0x80,0x60,0x04,0x00,0x00,
+    0x41,0x81,0xf8,0x70,0x08,0x00,0x00,0x75,0x1a,0x81,0xf9,0x00,0x0f,0x00,0x00,0x75,
+    0x12,0x83,0xf8,0x03,0x75,0x0d,0xc7,0x06,0xc0,0x08,0x00,0x00,0xb8,0xec,0x04,0x00
 };
 
 /* 64 bytes of the clean GTAVI eboot around RT Reflections runtime flag writer
@@ -628,6 +642,7 @@ struct patch_bundle {
     struct patch_site timestep;
     struct patch_site timestep2;
     struct patch_site taa2u;
+    struct patch_site pssr;
     struct patch_site rt_refl;
 };
 
@@ -692,6 +707,22 @@ static void build_patches(struct patch_bundle *b) {
         memcpy(b->taa2u.patch + 5, store_ret, sizeof(store_ret));
     }
 
+    /* PSSR::GetRenderDimensions() 11-byte override at 0x62e6bc5 (PS5 Pro):
+     *   b8 <float32>   mov eax, <res_pct / 100.0f>
+     *   c5 f9 6e c0    vmovd xmm0, eax
+     *   eb 37          jmp 0x62e6c07 (stock multiply + store + epilogue) */
+    b->pssr.name = "pssr_scale";
+    b->pssr.rva = PSSR_RVA;
+    b->pssr.len = PSSR_LEN;
+    b->pssr.ctx = PSSR_CTX;
+    if (g_res_pct > 0) {
+        static const uint8_t movd_jmp[6] = { 0xc5,0xf9,0x6e,0xc0,0xeb,0x37 };
+        float scale_f = (float)g_res_pct / 100.0f;
+        b->pssr.patch[0] = 0xb8;
+        put32le(b->pssr.patch + 1, float_bits(scale_f));
+        memcpy(b->pssr.patch + 5, movd_jmp, sizeof(movd_jmp));
+    }
+
     /* RT Reflections runtime disable patch (0x149dd26, 6B):
      *   31 c0 90 90 90 90   xor eax, eax; nop*4
      * Keeps 0xb3f3dd4 = 1 (all render target buffers allocated, no NULL crash)
@@ -733,8 +764,9 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     logmsg("OK", "GTAVI verified: %s pid %u base 0x%llx", titleid, pid,
            (unsigned long long)base);
 
-    /* Patch TAA2U::Update() first so it beats render target creation */
+    /* Patch TAA2U::Update() & PSSR::GetRenderDimensions() first so they beat render target creation */
     if (g_res_pct > 0) {
+        int pssr_alr = 0;
         if (verify_site(pid, base, &b->taa2u) == 1) {
             if (!apply_site(pid, base, &b->taa2u, &taa2u_alr))
                 taa2u_applied = 1;
@@ -742,6 +774,12 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
                 logmsg("WARN", "TAA2U scale write failed; continuing with FPS unlock");
         } else {
             logmsg("WARN", "TAA2U context mismatch; continuing with FPS unlock");
+        }
+        if (verify_site(pid, base, &b->pssr) == 1) {
+            if (apply_site(pid, base, &b->pssr, &pssr_alr))
+                logmsg("WARN", "PSSR scale write failed; continuing");
+        } else {
+            logmsg("WARN", "PSSR context mismatch");
         }
     }
 

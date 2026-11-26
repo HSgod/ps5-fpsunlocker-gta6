@@ -42,16 +42,21 @@ jobs:
         run: |
           VER=$(sed -n 's/^#define TOOL_VERSION "\(.*\)"/\1/p' src/gtavi-unlockfps.c)
           TAG="v${VER}"
+          SUBJ=$(git log -1 --pretty=%s)
           NOTES=$(git log -1 --pretty=%b)
           if [ -z "$NOTES" ]; then
-            NOTES=$(git log -1 --pretty=%s)
+            NOTES="$SUBJ"
+          fi
+          REL_FLAG="--latest"
+          if echo "$SUBJ" | grep -qi '\[prerelease\]'; then
+            REL_FLAG="--prerelease"
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             for asset in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
               gh release delete-asset "$TAG" "$asset" --yes || true
             done
-            gh release edit "$TAG" --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" --latest
+            gh release edit "$TAG" --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" $REL_FLAG
             gh release upload "$TAG" src/*.elf --clobber
           else
-            gh release create "$TAG" src/*.elf --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" --latest
+            gh release create "$TAG" src/*.elf --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" $REL_FLAG
           fi
