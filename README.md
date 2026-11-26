@@ -1,10 +1,10 @@
 # GTA VI FPS Unlocker (PS5)
 
-A lightweight `.elf` runtime payload for jailbroken **PlayStation 5** consoles that unlocks the 30 FPS cap, fixes delta-time game speed above 30 FPS, and lets you customize the internal `TAA2U` render resolution scale in *Grand Theft Auto VI* directly in memory—without modifying any game files on disk or degrading graphics quality presets.
+A lightweight `.elf` runtime payload for jailbroken **PlayStation 5** & **PS5 Pro** consoles that unlocks the 30 FPS cap, fixes delta-time game speed above 30 FPS, and lets you customize the internal render resolution scale (`TAA2U` on base PS5, **PSSR** on PS5 Pro) in *Grand Theft Auto VI* directly in memory—without modifying any game files on disk or degrading graphics quality presets.
 
 ## Requirements
 
-* Jailbroken PlayStation 5
+* Jailbroken PlayStation 5 or PS5 Pro
 * **Grand Theft Auto VI (`PPSA01547`, `PPSA29660`, `PPSA38500` — `v01.002.001`)**
 
 ## Download
@@ -13,9 +13,9 @@ Grab the latest prebuilt `.elf` directly from [**Releases**](https://github.com/
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.13.elf` through your Payload Manager (PLDMGR / `elfldr`).
+1. Load `GTAVI UnlockFPS_v1.14.elf` through your Payload Manager (PLDMGR / `elfldr`).
 2. A PS5 notification will appear confirming the payload is ready and waiting for GTAVI (`PPSA01547` / `PPSA29660` / `PPSA38500`) to launch *(up to 10 minutes in one-shot mode, or indefinitely when `daemon=1`)*.
-3. Start GTAVI *(load the payload **before** starting the game so the `TAA2U` resolution scale applies before render targets are allocated)*.
+3. Start GTAVI *(load the payload **before** starting the game so the `TAA2U` / `PSSR` resolution scale applies before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and either exits automatically (`daemon=0`) or stays running in the background to re-patch future launches (`daemon=1`).
 
 ## Configuration
@@ -34,7 +34,7 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 | Option | Values | Default | Description |
 | --- | --- | --- | --- |
 | **`fps`** | `30`–`120` | `60` | Target FPS cap. |
-| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` render resolution as a % of 4K output (`0` = stock `67%` / `1440p`). |
+| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of 4K output (`0` = stock). |
 | **`rt_reflections`** | `1` / `0` | `1` | Runtime RT Reflections toggle (`1` = stock ON; `0` = experimental OFF, +3–4 FPS, may cause ocean/water visual glitches). |
 | **`daemon`** | `0` / `1` | `0` | `0` = one-shot (waits up to 10 min and exits); `1` = stays in the background, reloads `fps.txt` and automatically re-patches GTAVI across game restarts. |
 
@@ -67,7 +67,7 @@ Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes th
 * Watches running `eboot.bin` processes strictly for `PPSA01547`, `PPSA29660`, and `PPSA38500` without touching memory of system apps or other titles.
 * Resolves the game's ASLR base address and checks **64 bytes of surrounding context** at every patch site before writing.
 * **FPS Unlock & Delta-Time Speed Fix:** Patches both target FPS writer sites (`0x3f73e51`, `0x40d2be1`) and lowers `fwTimer`'s minimum delta-time floor (`0x3f73ecd`, `0x41ec831`, `0xabab49c`, `0xabab4a0`) from `1/30s` to `1/3000s` (`0x39aec33e`) so gameplay runs at exact 1.0× speed at any framerate above 30 FPS.
-* **TAA2U Render Resolution Scale:** On base PS5, GTAVI hardcodes its `TAA2U` internal render scale to `0.6667` (`2560×1440` upscaled to 4K) inside `TAA2U::Update()` (`0x62eadc0`), with an internal clamp range of `0.20`–`1.00`. Patching this function lets you scale internal resolution freely from `25%` up to experimental native 4K (`100%`) while keeping all other graphics settings (shadows, lighting, RT, textures, LOD, foliage) 100% stock.
+* **TAA2U & PSSR Render Resolution Scale:** On base PS5, GTAVI hardcodes its `TAA2U` internal render scale to `0.6667` (`2560×1440` upscaled to 4K) inside `TAA2U::Update()` (`0x62eadc0`), with an internal clamp range of `0.20`–`1.00`. On PS5 Pro, `PSSR::GetRenderDimensions()` (`0x62e6bc5`) selects from fixed PSSR scale presets. Patching both lets `res_pct` scale internal resolution freely from `25%` up to experimental native 4K (`100%`) while keeping native `TAA2U` / `PSSR` upscaling and leaving all other graphics settings (shadows, lighting, RT, textures, LOD, foliage) 100% stock.
 * **Optional Runtime RT Reflections Toggle:** Setting `rt_reflections=0` zeroes the per-frame RT Reflections runtime flag (`0xb3f3e90` via `0x149dd26`) while keeping render target buffers allocated (`0xb3f3dd4 = 1`), cleanly skipping `sr_tracing` / `sr_denoising` dispatches for extra GPU headroom.
 * Uses kernel DMAP page-table writes on FW >= 8.40, or `mdbg_copyin` on older firmwares.
 
@@ -81,7 +81,8 @@ RVAs relative to `eboot.bin` map base, alongside static `+0x400000` addresses:
 | FPS cap writer #2 | `0x040d2be1` | `0x044d2be1` | `b8 <fps_u32> 66 90` |
 | `fwTimer` floor divisor writer #1 | `0x03f73ecd` | `0x04373ecd` | `b8 b8 0b 00 00 90` (`3000`) |
 | `fwTimer` floor writer #2 | `0x041ec831` | `0x045ec831` | `9090909090909090` |
-| `TAA2U::Update()` scale function | `0x062eadc0` | `0x066eadc0` | 18-byte replacement (`res_pct / 100.0f`) |
+| `TAA2U::Update()` scale function (PS5) | `0x062eadc0` | `0x066eadc0` | 18-byte replacement (`res_pct / 100.0f`) |
+| `PSSR::GetRenderDimensions()` scale override (PS5 Pro) | `0x062e6bc5` | `0x066e6bc5` | 11-byte override (`res_pct / 100.0f` → `jmp 0x62e6c07`) |
 | RT Reflections runtime flag writer | `0x0149dd26` | `0x0189dd26` | `31c090909090` *(only when `rt_reflections=0`)* |
 | RAM `g_MinFrameSec` | `0x0abab49c` | `0x0afab49c` | `3ec3ae39` (`1/3000s`) |
 | RAM `g_TargetFrameSec` | `0x0abab4a0` | `0x0afab4a0` | `3ec3ae39` (`1/3000s`) |
@@ -95,7 +96,7 @@ RVAs relative to `eboot.bin` map base, alongside static `+0x400000` addresses:
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.13.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.14.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh
