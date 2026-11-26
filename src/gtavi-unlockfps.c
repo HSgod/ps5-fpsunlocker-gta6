@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.11"
+#define TOOL_VERSION "1.12"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -65,8 +65,8 @@ static const char *const WANT_TITLE_IDS[] = {
 #define MAX_RES_PCT     100u
 
 /* Runtime RT Reflections toggle (sr_tracing + sr_denoising):
- * 0 = OFF via runtime flag 0xb3f3e90 (default, buffers stay allocated), 1 = stock (ON). */
-#define DEFAULT_RT_REFL 0u
+ * 1 = stock ON (default), 0 = OFF via runtime flag 0xb3f3e90 (experimental, may glitch water). */
+#define DEFAULT_RT_REFL 1u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -274,7 +274,7 @@ static void load_settings(void) {
                        "# fps: target FPS cap (30..120). Default: 60.\n"
                        "# res_pct: TAA2U internal render resolution %% of 4K output (stock PS5 = 67%% / 1440p):\n"
                        "#   0 = stock, 50 = 1080p (range 50..100)\n"
-                       "# rt_reflections: 1 = stock (ON), 0 = disable RT Reflections at runtime\n"
+                       "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
                        "fps=%u\n"
                        "res_pct=%u\n"
                        "rt_reflections=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_RT_REFL);
@@ -323,7 +323,7 @@ static void load_settings(void) {
                 logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
             }
             if (!saw_rt_refl) {
-                fprintf(f, "# rt_reflections: 1 = stock (ON), 0 = disable RT Reflections at runtime\n"
+                fprintf(f, "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
                            "rt_reflections=%u\n", DEFAULT_RT_REFL);
                 logmsg("INFO", "appended default rt_reflections=%u to %s", DEFAULT_RT_REFL, CONF_PATH);
             }

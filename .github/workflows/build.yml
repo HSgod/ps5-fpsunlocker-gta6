@@ -39,12 +39,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VER=$(sed -n 's/^#define TOOL_VERSION "\(.*\)"/\1/p' src/gtavi-unlockfps.c)
-          if gh release view latest >/dev/null 2>&1; then
-            for asset in $(gh release view latest --json assets -q '.assets[].name'); do
-              gh release delete-asset latest "$asset" --yes || true
+          TAG="v${VER}"
+          NOTES=$(git log -1 --pretty=%b)
+          if [ -z "$NOTES" ]; then
+            NOTES=$(git log -1 --pretty=%s)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            for asset in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
+              gh release delete-asset "$TAG" "$asset" --yes || true
             done
-            gh release edit latest --title "GTAVI Unlock FPS v${VER}" --notes "Automated PS5 payload build from commit ${GITHUB_SHA::7}."
-            gh release upload latest src/*.elf --clobber
+            gh release edit "$TAG" --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" --latest
+            gh release upload "$TAG" src/*.elf --clobber
           else
-            gh release create latest src/*.elf --title "GTAVI Unlock FPS v${VER}" --notes "Automated PS5 payload build from commit ${GITHUB_SHA::7}."
+            gh release create "$TAG" src/*.elf --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" --latest
           fi
