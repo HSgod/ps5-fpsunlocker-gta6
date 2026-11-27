@@ -42,7 +42,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.14"
+#define TOOL_VERSION "1.15"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -54,35 +54,58 @@ static const char *const WANT_TITLE_IDS[] = {
     "PPSA01547", "PPSA29660", "PPSA38500"
 };
 
-#define DEFAULT_FPS     60u
-#define MIN_FPS         30u
-#define MAX_FPS         120u
+#define DEFAULT_FPS         60u
+#define MIN_FPS             30u
+#define MAX_FPS             120u
 
-/* Internal TAA2U render resolution percentage of output (stock PS5 = 67% / 1440p).
+/* Internal TAA2U (PS5) / PSSR (PS5 Pro) render resolution % of output.
  * 0 = stock (untouched), 25..100 = custom percent (default 50 = 1080p on 4K; <50 experimental). */
-#define DEFAULT_RES_PCT 50u
-#define MIN_RES_PCT     25u
-#define MAX_RES_PCT     100u
+#define DEFAULT_RES_PCT     50u
+#define MIN_RES_PCT         25u
+#define MAX_RES_PCT         100u
 
-/* Runtime RT Reflections toggle (sr_tracing + sr_denoising):
- * 1 = stock ON (default), 0 = OFF via runtime flag 0xb3f3e90 (experimental, may glitch water). */
-#define DEFAULT_RT_REFL 1u
+/* Refresh rate assumed by sceVideoOutSetFlipRate divider (60 = stock, 120 = forced 120 Hz). */
+#define DEFAULT_REFRESH_HZ  60u
+
+/* Optional swapchain output buffer resolution:
+ * 0 = stock 4K (3840x2160), 1440 = 2560x1440, 1080 = 1920x1080 (experimental). */
+#define DEFAULT_OUTPUT_RES  0u
+
+/* Experimental PS5 Pro Half-Res RT Reflections (lowers Tier 3 -> base PS5 Tier 0):
+ * 0 = stock (default), 1 = half-res RT Reflections on PS5 Pro. */
+#define DEFAULT_PRO_RT_HALF 0u
 
 /* Background daemon mode:
  * 0 = one-shot (wait up to 10 min, patch once, exit), 1 = stay in background across restarts. */
-#define DEFAULT_DAEMON  0u
+#define DEFAULT_DAEMON      0u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
-#define SITE1_RVA     0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
-#define SITE1_LEN     6u
-#define SITE2_RVA     0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
-#define SITE2_LEN     7u
-#define TIMESTEP_RVA  0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
-#define TIMESTEP_LEN  6u
-#define TIMESTEP2_RVA 0x41ec831u /* vmovss [0xabab4a0], xmm0          (8 bytes)  */
-#define TIMESTEP2_LEN 8u
-#define RT_REFL_RVA   0x149dd26u /* mov al, byte ptr [rax + 0x753]    (6 bytes)  */
-#define RT_REFL_LEN   6u
+#define SITE1_RVA       0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
+#define SITE1_LEN       6u
+#define SITE2_RVA       0x40d2be1u /* mov eax, dword ptr [r14 + 0x204]  (7 bytes)  */
+#define SITE2_LEN       7u
+#define TIMESTEP_RVA    0x3f73ecdu /* mov eax, dword ptr [rax + 0x614]  (6 bytes)  */
+#define TIMESTEP_LEN    6u
+#define TIMESTEP2_RVA   0x41ec831u /* vmovss [0xabab4a0], xmm0          (8 bytes)  */
+#define TIMESTEP2_LEN   8u
+
+/* Hardcoded 60 Hz (0x3c) / 61 (0x3d) constants in sceVideoOutSetFlipRate divider: */
+#define HZ1_A_RVA       0x44a326eu /* imm8 0x3c inside mov eax, 0x3c    (1 byte)   */
+#define HZ1_B_RVA       0x44a3288u /* imm8 0x3d inside cmp esi, 0x3d    (1 byte)   */
+#define HZ2_A_RVA       0x851c81eu
+#define HZ2_B_RVA       0x851c838u
+#define HZ3_A_RVA       0x852228cu
+#define HZ3_B_RVA       0x85222a7u
+
+/* Swapchain output width/height loads in CSettingsManager::ApplySettings: */
+#define OUT_W_RVA       0x3f73db4u /* mov eax, dword ptr [rbx + 0xe10]  (6 bytes)  */
+#define OUT_H1_RVA      0x3f73dc9u /* mov eax, dword ptr [rbx + 0xe14]  (6 bytes)  */
+#define OUT_H2_RVA      0x3f73dd7u /* mov ecx, dword ptr [rbx + 0xe14]  (6 bytes)  */
+#define OUT_LEN         6u
+
+/* PS5 Pro RT Reflections quality tier load (0x9dca910 table): */
+#define PRO_RT_HALF_RVA 0x6326444u /* mov ecx, dword ptr [rdi + 0x54]   (3 bytes)  */
+#define PRO_RT_HALF_LEN 3u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -153,13 +176,70 @@ static const uint8_t PSSR_CTX[64] = {
     0x12,0x83,0xf8,0x03,0x75,0x0d,0xc7,0x06,0xc0,0x08,0x00,0x00,0xb8,0xec,0x04,0x00
 };
 
-/* 64 bytes of the clean GTAVI eboot around RT Reflections runtime flag writer
- * (0x149dd26: mov al, [rax+0x753] -> [0xb3f3e90], site at +32, len 6): */
-static const uint8_t RT_REFL_CTX[64] = {
-    0x83,0x3d,0xab,0xe2,0xa6,0x0a,0x01,0x89,0x0d,0x45,0x21,0xf5,0x09,0x89,0x0d,0xc7,
-    0x21,0xf5,0x09,0x0f,0x84,0x80,0xdf,0xff,0xff,0x48,0x8b,0x05,0xd2,0x70,0xa6,0x0a,
-    0x8a,0x80,0x53,0x07,0x00,0x00,0x88,0x05,0x5e,0x61,0xf5,0x09,0x84,0xc0,0x0f,0x84,
-    0x6c,0xdf,0xff,0xff,0x80,0x3d,0xc7,0x20,0xf5,0x09,0x00,0x75,0x0d,0xf6,0x05,0xca
+/* 64-byte contexts for 120 Hz flip-rate constants (sites at +32, len 1): */
+static const uint8_t HZ1_A_CTX[64] = {
+    0xc0,0xc4,0xe1,0xfa,0x2c,0xf0,0x48,0xb8,0x3c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+    0x48,0x89,0x05,0x27,0x88,0x31,0x0a,0x81,0xfb,0xff,0x00,0x00,0x00,0x75,0x1f,0xb8,
+    0x3c,0x00,0x00,0x00,0x31,0xd2,0xbb,0x01,0x00,0x00,0x00,0xf7,0xf6,0xba,0x04,0x00,
+    0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,0x3d,0x0f,0x42,0xda,0x80,0x3d
+};
+static const uint8_t HZ1_B_CTX[64] = {
+    0x00,0x00,0x00,0x75,0x1f,0xb8,0x3c,0x00,0x00,0x00,0x31,0xd2,0xbb,0x01,0x00,0x00,
+    0x00,0xf7,0xf6,0xba,0x04,0x00,0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,
+    0x3d,0x0f,0x42,0xda,0x80,0x3d,0x95,0xaf,0xf1,0x09,0x02,0x88,0x1d,0x6f,0x88,0x31,
+    0x0a,0x89,0x35,0x39,0xc0,0xf1,0x09,0x89,0x0d,0x07,0xbf,0xf1,0x09,0x0f,0x94,0x05
+};
+static const uint8_t HZ2_A_CTX[64] = {
+    0x06,0xc4,0xe1,0xea,0x2a,0xc9,0xc5,0xfa,0x10,0x05,0x60,0xff,0x75,0x01,0xc5,0xfa,
+    0x5e,0xc9,0xc4,0xe1,0xfa,0x2c,0xf1,0x81,0xfb,0xff,0x00,0x00,0x00,0x75,0x1f,0xb8,
+    0x3c,0x00,0x00,0x00,0x31,0xd2,0xbb,0x01,0x00,0x00,0x00,0xf7,0xf6,0xba,0x04,0x00,
+    0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,0x3d,0x0f,0x42,0xda,0x80,0x3d
+};
+static const uint8_t HZ2_B_CTX[64] = {
+    0x00,0x00,0x00,0x75,0x1f,0xb8,0x3c,0x00,0x00,0x00,0x31,0xd2,0xbb,0x01,0x00,0x00,
+    0x00,0xf7,0xf6,0xba,0x04,0x00,0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,
+    0x3d,0x0f,0x42,0xda,0x80,0x3d,0xe5,0x19,0xea,0x05,0x02,0x88,0x1d,0xbf,0xf2,0x29,
+    0x06,0x89,0x35,0x89,0x2a,0xea,0x05,0x89,0x0d,0x57,0x29,0xea,0x05,0x0f,0x94,0x05
+};
+static const uint8_t HZ3_A_CTX[64] = {
+    0xc4,0xe1,0xfa,0x2c,0xf0,0x48,0xb8,0x3c,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x48,
+    0x89,0x05,0x0a,0x98,0x29,0x06,0x41,0x81,0xfe,0xff,0x00,0x00,0x00,0x75,0x21,0xb8,
+    0x3c,0x00,0x00,0x00,0x31,0xd2,0x41,0xbe,0x01,0x00,0x00,0x00,0xf7,0xf6,0xba,0x04,
+    0x00,0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,0x3d,0x44,0x0f,0x42,0xf2
+};
+static const uint8_t HZ3_B_CTX[64] = {
+    0x00,0x00,0x75,0x21,0xb8,0x3c,0x00,0x00,0x00,0x31,0xd2,0x41,0xbe,0x01,0x00,0x00,
+    0x00,0xf7,0xf6,0xba,0x04,0x00,0x00,0x00,0x83,0xf8,0x04,0x0f,0x42,0xd0,0x83,0xfe,
+    0x3d,0x44,0x0f,0x42,0xf2,0x80,0x3d,0x75,0xbf,0xe9,0x05,0x02,0x44,0x88,0x35,0x4e,
+    0x98,0x29,0x06,0x89,0x35,0x18,0xd0,0xe9,0x05,0x89,0x0d,0xe6,0xce,0xe9,0x05,0x0f
+};
+
+/* 64-byte contexts for swapchain output width/height loads (sites at +32, len 6): */
+static const uint8_t OUT_W_CTX[64] = {
+    0x31,0xc0,0x8b,0xbb,0x04,0x0e,0x00,0x00,0x48,0x8d,0x48,0x08,0x48,0x85,0xc0,0x48,
+    0x0f,0x44,0xc8,0x3b,0xb9,0x4c,0x01,0x00,0x00,0x73,0x05,0xe8,0x8c,0xdc,0xac,0xff,
+    0x8b,0x83,0x10,0x0e,0x00,0x00,0x4c,0x8d,0xa3,0x18,0x0c,0x00,0x00,0x39,0x05,0xbd,
+    0x7c,0x84,0x0a,0x75,0x0e,0x8b,0x83,0x14,0x0e,0x00,0x00,0x89,0x05,0xb3,0x7c,0x84
+};
+static const uint8_t OUT_H1_CTX[64] = {
+    0x4c,0x01,0x00,0x00,0x73,0x05,0xe8,0x8c,0xdc,0xac,0xff,0x8b,0x83,0x10,0x0e,0x00,
+    0x00,0x4c,0x8d,0xa3,0x18,0x0c,0x00,0x00,0x39,0x05,0xbd,0x7c,0x84,0x0a,0x75,0x0e,
+    0x8b,0x83,0x14,0x0e,0x00,0x00,0x89,0x05,0xb3,0x7c,0x84,0x0a,0xeb,0x1f,0x8b,0x8b,
+    0x14,0x0e,0x00,0x00,0x39,0x0d,0xa5,0x7c,0x84,0x0a,0x89,0x05,0x9b,0x7c,0x84,0x0a
+};
+static const uint8_t OUT_H2_CTX[64] = {
+    0x0e,0x00,0x00,0x4c,0x8d,0xa3,0x18,0x0c,0x00,0x00,0x39,0x05,0xbd,0x7c,0x84,0x0a,
+    0x75,0x0e,0x8b,0x83,0x14,0x0e,0x00,0x00,0x89,0x05,0xb3,0x7c,0x84,0x0a,0xeb,0x1f,
+    0x8b,0x8b,0x14,0x0e,0x00,0x00,0x39,0x0d,0xa5,0x7c,0x84,0x0a,0x89,0x05,0x9b,0x7c,
+    0x84,0x0a,0x89,0x0d,0x99,0x7c,0x84,0x0a,0x74,0x05,0xe8,0x8a,0x1e,0x05,0x00,0xe8
+};
+
+/* 64-byte context for PS5 Pro RT Reflections quality tier load (site at +32, len 3): */
+static const uint8_t PRO_RT_HALF_CTX[64] = {
+    0x1f,0x49,0x8b,0x06,0x48,0x3b,0x83,0x60,0x02,0x00,0x00,0x0f,0x85,0xb0,0x31,0x00,
+    0x00,0x48,0x8d,0x65,0xd8,0x5b,0x41,0x5c,0x41,0x5d,0x41,0x5e,0x41,0x5f,0x5d,0xc3,
+    0x8b,0x4f,0x54,0xb8,0x03,0x00,0x00,0x00,0x44,0x8b,0x97,0x40,0x01,0x00,0x00,0x44,
+    0x8b,0x87,0xf8,0x01,0x00,0x00,0x44,0x8b,0x8f,0xfc,0x01,0x00,0x00,0x4c,0x8d,0x35
 };
 
 #ifndef LOG_DIR
@@ -206,7 +286,9 @@ static FILE *g_log;
 static struct timespec g_t0;
 static uint32_t g_target_fps = DEFAULT_FPS;
 static uint32_t g_res_pct = DEFAULT_RES_PCT;
-static uint32_t g_rt_refl = DEFAULT_RT_REFL;
+static uint32_t g_refresh_hz = DEFAULT_REFRESH_HZ;
+static uint32_t g_output_res = DEFAULT_OUTPUT_RES;
+static uint32_t g_pro_rt_half = DEFAULT_PRO_RT_HALF;
 static uint32_t g_daemon = DEFAULT_DAEMON;
 
 static unsigned long elapsed_ms(void) {
@@ -285,13 +367,17 @@ static int lock_instance(void) {
 static void load_settings(void) {
     char line[128];
     int saw_res_pct = 0;
-    int saw_rt_refl = 0;
+    int saw_refresh_hz = 0;
+    int saw_output_res = 0;
+    int saw_pro_rt_half = 0;
     int saw_daemon = 0;
     FILE *f;
 
     g_target_fps = DEFAULT_FPS;
     g_res_pct = DEFAULT_RES_PCT;
-    g_rt_refl = DEFAULT_RT_REFL;
+    g_refresh_hz = DEFAULT_REFRESH_HZ;
+    g_output_res = DEFAULT_OUTPUT_RES;
+    g_pro_rt_half = DEFAULT_PRO_RT_HALF;
     g_daemon = DEFAULT_DAEMON;
 
     f = fopen(CONF_PATH, "r");
@@ -299,15 +385,22 @@ static void load_settings(void) {
         f = fopen(CONF_PATH, "w");
         if (f) {
             fprintf(f, "# GTAVI Unlock FPS runtime patcher settings\n"
-                       "# fps: target FPS cap (30..120). Default: 60.\n"
-                       "# res_pct: TAA2U internal render resolution %% of 4K output (stock PS5 = 67%% / 1440p):\n"
-                       "#   0 = stock, 50 = 1080p (default), 25..49 = experimental (33 = ~720p)\n"
-                       "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
+                       "# fps: target FPS cap (30..120). On 60 Hz output: 30 = 30 FPS, 31..120 = up to 60 FPS.\n"
+                       "#   With forced 120 Hz + refresh_hz=120: 30, 40, 60, or 120 FPS hardware locks.\n"
+                       "# res_pct: internal TAA2U (PS5) / PSSR (PS5 Pro) resolution %% of output:\n"
+                       "#   0 = stock, 50 = 1080p (default), 55/60 = middle ground, 25..49 = experimental\n"
+                       "# refresh_hz: 60 = stock (default), 120 = use when forcing 120 Hz via PS Patch System\n"
+                       "# output_res: 0 = stock 4K (default), 1440 = 2560x1440, 1080 = 1920x1080 (experimental)\n"
+                       "# pro_rt_half: 0 = stock (default), 1 = PS5 Pro half-res RT Reflections (experimental)\n"
                        "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
                        "fps=%u\n"
                        "res_pct=%u\n"
-                       "rt_reflections=%u\n"
-                       "daemon=%u\n", DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_RT_REFL, DEFAULT_DAEMON);
+                       "refresh_hz=%u\n"
+                       "output_res=%u\n"
+                       "pro_rt_half=%u\n"
+                       "daemon=%u\n",
+                       DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_REFRESH_HZ,
+                       DEFAULT_OUTPUT_RES, DEFAULT_PRO_RT_HALF, DEFAULT_DAEMON);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -333,12 +426,26 @@ static void load_settings(void) {
                 logmsg("WARN", "ignoring res_pct=%d (must be 0 or %u..%u)",
                        v, MIN_RES_PCT, MAX_RES_PCT);
             }
-        } else if (!strncmp(line, "rt_reflections", 14)) {
-            saw_rt_refl = 1;
-            if (v == 0 || v == 1) {
-                g_rt_refl = (uint32_t)v;
+        } else if (!strncmp(line, "refresh_hz", 10)) {
+            saw_refresh_hz = 1;
+            if (v == 60 || v == 120) {
+                g_refresh_hz = (uint32_t)v;
             } else {
-                logmsg("WARN", "ignoring rt_reflections=%d (must be 0 or 1)", v);
+                logmsg("WARN", "ignoring refresh_hz=%d (must be 60 or 120)", v);
+            }
+        } else if (!strncmp(line, "output_res", 10)) {
+            saw_output_res = 1;
+            if (v == 0 || v == 1080 || v == 1440) {
+                g_output_res = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring output_res=%d (must be 0, 1080, or 1440)", v);
+            }
+        } else if (!strncmp(line, "pro_rt_half", 11)) {
+            saw_pro_rt_half = 1;
+            if (v == 0 || v == 1) {
+                g_pro_rt_half = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring pro_rt_half=%d (must be 0 or 1)", v);
             }
         } else if (!strncmp(line, "daemon", 6)) {
             saw_daemon = 1;
@@ -348,21 +455,32 @@ static void load_settings(void) {
                 logmsg("WARN", "ignoring daemon=%d (must be 0 or 1)", v);
             }
         }
+        /* Legacy rt_reflections= lines from older versions are silently ignored. */
     }
     fclose(f);
 
-    if (!saw_res_pct || !saw_rt_refl || !saw_daemon) {
+    if (!saw_res_pct || !saw_refresh_hz || !saw_output_res || !saw_pro_rt_half || !saw_daemon) {
         f = fopen(CONF_PATH, "a");
         if (f) {
             if (!saw_res_pct) {
-                fprintf(f, "# res_pct: TAA2U internal resolution %% (0=stock, 50=1080p, 25..49=experimental)\n"
+                fprintf(f, "# res_pct: internal resolution %% (0=stock, 50=1080p, 25..49=experimental)\n"
                            "res_pct=%u\n", DEFAULT_RES_PCT);
                 logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
             }
-            if (!saw_rt_refl) {
-                fprintf(f, "# rt_reflections: 1 = stock ON (default), 0 = OFF (experimental, may glitch ocean water)\n"
-                           "rt_reflections=%u\n", DEFAULT_RT_REFL);
-                logmsg("INFO", "appended default rt_reflections=%u to %s", DEFAULT_RT_REFL, CONF_PATH);
+            if (!saw_refresh_hz) {
+                fprintf(f, "# refresh_hz: 60 = stock (default), 120 = use when forcing 120 Hz via PS Patch System\n"
+                           "refresh_hz=%u\n", DEFAULT_REFRESH_HZ);
+                logmsg("INFO", "appended default refresh_hz=%u to %s", DEFAULT_REFRESH_HZ, CONF_PATH);
+            }
+            if (!saw_output_res) {
+                fprintf(f, "# output_res: 0 = stock 4K (default), 1440 = 2560x1440, 1080 = 1920x1080 (experimental)\n"
+                           "output_res=%u\n", DEFAULT_OUTPUT_RES);
+                logmsg("INFO", "appended default output_res=%u to %s", DEFAULT_OUTPUT_RES, CONF_PATH);
+            }
+            if (!saw_pro_rt_half) {
+                fprintf(f, "# pro_rt_half: 0 = stock (default), 1 = PS5 Pro half-res RT Reflections (experimental)\n"
+                           "pro_rt_half=%u\n", DEFAULT_PRO_RT_HALF);
+                logmsg("INFO", "appended default pro_rt_half=%u to %s", DEFAULT_PRO_RT_HALF, CONF_PATH);
             }
             if (!saw_daemon) {
                 fprintf(f, "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
@@ -643,8 +761,71 @@ struct patch_bundle {
     struct patch_site timestep2;
     struct patch_site taa2u;
     struct patch_site pssr;
-    struct patch_site rt_refl;
+    struct patch_site hz[6];
+    struct patch_site out[3];
+    struct patch_site pro_rt_half;
 };
+
+static int is_site_patched(uint32_t pid, uint64_t base, const struct patch_site *s) {
+    uint8_t cur[24];
+    if (proc_read(pid, base + s->rva, cur, s->len))
+        return 0;
+    return !memcmp(cur, s->patch, s->len);
+}
+
+/* Verify ALL sites in a group (which may have overlapping 64-byte contexts)
+ * before writing ANY of them. Returns 1 if all sites were applied or already
+ * patched, 0 on mismatch or write failure. */
+static int apply_site_group(uint32_t pid, uint64_t base,
+                            const struct patch_site *sites, unsigned n,
+                            const char *group_name, int *all_already) {
+    unsigned i;
+    int all_alr = 1;
+    int any_already = 0;
+
+    for (i = 0; i < n; i++) {
+        if (is_site_patched(pid, base, &sites[i])) {
+            any_already = 1;
+        } else {
+            all_alr = 0;
+        }
+    }
+    if (all_alr) {
+        for (i = 0; i < n; i++)
+            logmsg("OK", "%s already patched at 0x%llx", sites[i].name,
+                   (unsigned long long)(base + sites[i].rva));
+        *all_already = 1;
+        return 1;
+    }
+    if (!any_already) {
+        for (i = 0; i < n; i++) {
+            if (verify_site(pid, base, &sites[i]) != 1) {
+                logmsg("WARN", "%s context mismatch (%s)", group_name, sites[i].name);
+                return 0;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) {
+        int dummy = 0;
+        if (apply_site(pid, base, &sites[i], &dummy)) {
+            logmsg("WARN", "%s write failed (%s)", group_name, sites[i].name);
+            return 0;
+        }
+    }
+    *all_already = 0;
+    return 1;
+}
+
+static void format_opt_flags(char *buf, size_t sz) {
+    size_t len = 0;
+    buf[0] = '\0';
+    if (g_refresh_hz == 120)
+        len += (size_t)snprintf(buf + len, sz - len, ", 120Hz");
+    if (g_output_res == 1440 || g_output_res == 1080)
+        len += (size_t)snprintf(buf + len, sz - len, ", Out %up", g_output_res);
+    if (g_pro_rt_half)
+        len += (size_t)snprintf(buf + len, sz - len, ", Pro RT Half");
+}
 
 static void build_patches(struct patch_bundle *b) {
     memset(b, 0, sizeof(*b));
@@ -686,7 +867,7 @@ static void build_patches(struct patch_bundle *b) {
     b->timestep2.ctx = TIMESTEP2_CTX;
     memset(b->timestep2.patch, 0x90, TIMESTEP2_LEN);
 
-    /* TAA2U::Update() 18-byte replacement:
+    /* TAA2U::Update() 18-byte replacement (PS5 Fat/Slim):
      *   b8 <float32>         mov eax, <res_pct / 100.0f>
      *   89 87 90 00 00 00    mov dword ptr [rdi + 0x90], eax
      *   89 87 94 00 00 00    mov dword ptr [rdi + 0x94], eax
@@ -723,20 +904,52 @@ static void build_patches(struct patch_bundle *b) {
         memcpy(b->pssr.patch + 5, movd_jmp, sizeof(movd_jmp));
     }
 
-    /* RT Reflections runtime disable patch (0x149dd26, 6B):
-     *   31 c0 90 90 90 90   xor eax, eax; nop*4
-     * Keeps 0xb3f3dd4 = 1 (all render target buffers allocated, no NULL crash)
-     * while zeroing per-frame runtime flag 0xb3f3e90 to skip sr_tracing/denoising. */
-    b->rt_refl.name = "rt_reflections_off";
-    b->rt_refl.rva = RT_REFL_RVA;
-    b->rt_refl.len = RT_REFL_LEN;
-    b->rt_refl.ctx = RT_REFL_CTX;
-    b->rt_refl.patch[0] = 0x31;
-    b->rt_refl.patch[1] = 0xc0;
-    b->rt_refl.patch[2] = 0x90;
-    b->rt_refl.patch[3] = 0x90;
-    b->rt_refl.patch[4] = 0x90;
-    b->rt_refl.patch[5] = 0x90;
+    /* 120 Hz flip-rate constants (3 sites: 0x3c -> 0x78 [120], 0x3d -> 0x79 [121]): */
+    b->hz[0].name = "hz1_div"; b->hz[0].rva = HZ1_A_RVA; b->hz[0].len = 1; b->hz[0].ctx = HZ1_A_CTX; b->hz[0].patch[0] = 0x78;
+    b->hz[1].name = "hz1_cmp"; b->hz[1].rva = HZ1_B_RVA; b->hz[1].len = 1; b->hz[1].ctx = HZ1_B_CTX; b->hz[1].patch[0] = 0x79;
+    b->hz[2].name = "hz2_div"; b->hz[2].rva = HZ2_A_RVA; b->hz[2].len = 1; b->hz[2].ctx = HZ2_A_CTX; b->hz[2].patch[0] = 0x78;
+    b->hz[3].name = "hz2_cmp"; b->hz[3].rva = HZ2_B_RVA; b->hz[3].len = 1; b->hz[3].ctx = HZ2_B_CTX; b->hz[3].patch[0] = 0x79;
+    b->hz[4].name = "hz3_div"; b->hz[4].rva = HZ3_A_RVA; b->hz[4].len = 1; b->hz[4].ctx = HZ3_A_CTX; b->hz[4].patch[0] = 0x78;
+    b->hz[5].name = "hz3_cmp"; b->hz[5].rva = HZ3_B_RVA; b->hz[5].len = 1; b->hz[5].ctx = HZ3_B_CTX; b->hz[5].patch[0] = 0x79;
+
+    /* Swapchain output width/height overrides in CSettingsManager::ApplySettings: */
+    if (g_output_res == 1440 || g_output_res == 1080) {
+        uint32_t out_w = (g_output_res == 1440) ? 2560u : 1920u;
+        uint32_t out_h = g_output_res;
+
+        b->out[0].name = "out_width";
+        b->out[0].rva = OUT_W_RVA;
+        b->out[0].len = OUT_LEN;
+        b->out[0].ctx = OUT_W_CTX;
+        b->out[0].patch[0] = 0xb8; /* mov eax, out_w; nop */
+        put32le(b->out[0].patch + 1, out_w);
+        b->out[0].patch[5] = 0x90;
+
+        b->out[1].name = "out_height1";
+        b->out[1].rva = OUT_H1_RVA;
+        b->out[1].len = OUT_LEN;
+        b->out[1].ctx = OUT_H1_CTX;
+        b->out[1].patch[0] = 0xb8; /* mov eax, out_h; nop */
+        put32le(b->out[1].patch + 1, out_h);
+        b->out[1].patch[5] = 0x90;
+
+        b->out[2].name = "out_height2";
+        b->out[2].rva = OUT_H2_RVA;
+        b->out[2].len = OUT_LEN;
+        b->out[2].ctx = OUT_H2_CTX;
+        b->out[2].patch[0] = 0xb9; /* mov ecx, out_h; nop */
+        put32le(b->out[2].patch + 1, out_h);
+        b->out[2].patch[5] = 0x90;
+    }
+
+    /* PS5 Pro Half-Res RT Reflections (0x6326444, 3B: mov ecx, [rdi+0x54] -> xor ecx, ecx; nop): */
+    b->pro_rt_half.name = "pro_rt_half";
+    b->pro_rt_half.rva = PRO_RT_HALF_RVA;
+    b->pro_rt_half.len = PRO_RT_HALF_LEN;
+    b->pro_rt_half.ctx = PRO_RT_HALF_CTX;
+    b->pro_rt_half.patch[0] = 0x31;
+    b->pro_rt_half.patch[1] = 0xc9;
+    b->pro_rt_half.patch[2] = 0x90;
 }
 
 static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_open,
@@ -744,8 +957,9 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     uint64_t base = 0;
     int already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
-    int rt_refl_applied = 0, rt_refl_alr = 0;
+    int hz_alr = 0, out_alr = 0, rt_half_alr = 0;
     unsigned long found_ms = elapsed_ms();
+    char flags[64];
     int match;
 
     logmsg("OK", "found %s pid %u%s, verifying eboot...", titleid, pid,
@@ -764,7 +978,12 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     logmsg("OK", "GTAVI verified: %s pid %u base 0x%llx", titleid, pid,
            (unsigned long long)base);
 
-    /* Patch TAA2U::Update() & PSSR::GetRenderDimensions() first so they beat render target creation */
+    /* Patch output resolution, TAA2U/PSSR scale, and Pro RT Half-Res first so
+     * they beat swapchain and render target allocation. */
+    if (g_output_res == 1440 || g_output_res == 1080) {
+        apply_site_group(pid, base, b->out, 3, "output_res", &out_alr);
+    }
+
     if (g_res_pct > 0) {
         int pssr_alr = 0;
         if (verify_site(pid, base, &b->taa2u) == 1) {
@@ -780,6 +999,15 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
                 logmsg("WARN", "PSSR scale write failed; continuing");
         } else {
             logmsg("WARN", "PSSR context mismatch");
+        }
+    }
+
+    if (g_pro_rt_half) {
+        if (verify_site(pid, base, &b->pro_rt_half) == 1) {
+            if (apply_site(pid, base, &b->pro_rt_half, &rt_half_alr))
+                logmsg("WARN", "Pro RT Half-Res write failed");
+        } else {
+            logmsg("WARN", "Pro RT Half-Res context mismatch");
         }
     }
 
@@ -803,30 +1031,22 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         logmsg("WARN", "fwTimer floor2 context mismatch");
     }
 
-    if (!g_rt_refl) {
-        if (verify_site(pid, base, &b->rt_refl) == 1) {
-            if (!apply_site(pid, base, &b->rt_refl, &rt_refl_alr))
-                rt_refl_applied = 1;
-            else
-                logmsg("WARN", "RT Reflections disable write failed");
-        } else {
-            logmsg("WARN", "RT Reflections context mismatch");
-        }
+    if (g_refresh_hz == 120) {
+        apply_site_group(pid, base, b->hz, 6, "refresh_hz_120", &hz_alr);
     }
 
     update_live_globals(pid, base);
     logmsg("OK", "all patches applied in %lu ms", elapsed_ms() - found_ms);
 
+    format_opt_flags(flags, sizeof(flags));
     if (already1 && already2 && (!g_res_pct || taa2u_alr) &&
-        (g_rt_refl || rt_refl_alr)) {
-        notify("already active (Res %u%%%s).",
-               g_res_pct, rt_refl_alr ? ", RT Refl OFF" : "");
+        (g_refresh_hz != 120 || hz_alr) && (!g_output_res || out_alr) &&
+        (!g_pro_rt_half || rt_half_alr)) {
+        notify("already active (Res %u%%%s).", g_res_pct, flags);
     } else if (taa2u_applied) {
-        notify("FPS Unlocked, Res %u%%%s",
-               g_res_pct, rt_refl_applied ? ", RT Refl OFF" : "");
+        notify("FPS Unlocked, Res %u%%%s", g_res_pct, flags);
     } else {
-        notify("FPS Unlocked%s",
-               rt_refl_applied ? ", RT Refl OFF" : "");
+        notify("FPS Unlocked%s", flags);
     }
 
     return EXIT_OK;
@@ -840,6 +1060,7 @@ int main(void) {
     uint32_t patched_pid = 0;
     unsigned poll = 0, fails = 0;
     int first_session = 1;
+    char flags[64];
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
 #ifndef HOST_TEST
@@ -852,29 +1073,26 @@ int main(void) {
     }
     log_open();
     load_settings();
-    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, rt_reflections=%u, daemon=%u)",
-           TOOL_VERSION, g_target_fps, g_res_pct, g_rt_refl, g_daemon);
+    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, refresh_hz=%u, output_res=%u, pro_rt_half=%u, daemon=%u)",
+           TOOL_VERSION, g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_pro_rt_half, g_daemon);
 #ifndef HOST_TEST
     logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
            (kernel_get_fw_version() >> 16) & 0xff);
 #endif
 
     build_patches(&patches);
+    format_opt_flags(flags, sizeof(flags));
 
     if (g_daemon) {
         if (g_res_pct > 0)
-            notify("ready (Res %u%%%s, daemon). Waiting for GTAVI.",
-                   g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
+            notify("ready (Res %u%%%s, daemon). Waiting for GTAVI.", g_res_pct, flags);
         else
-            notify("ready (Res stock%s, daemon). Waiting for GTAVI.",
-                   g_rt_refl ? "" : ", RT Refl OFF");
+            notify("ready (Res stock%s, daemon). Waiting for GTAVI.", flags);
     } else {
         if (g_res_pct > 0)
-            notify("ready (Res %u%%%s). Start GTAVI within 10 min.",
-                   g_res_pct, g_rt_refl ? "" : ", RT Refl OFF");
+            notify("ready (Res %u%%%s). Start GTAVI within 10 min.", g_res_pct, flags);
         else
-            notify("ready (Res stock%s). Start GTAVI within 10 min.",
-                   g_rt_refl ? "" : ", RT Refl OFF");
+            notify("ready (Res stock%s). Start GTAVI within 10 min.", flags);
     }
 
     for (poll = 0; g_daemon || poll < WAIT_POLLS; poll++) {
@@ -929,8 +1147,8 @@ int main(void) {
             if (!first_session) {
                 load_settings();
                 build_patches(&patches);
-                logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, rt_reflections=%u, daemon=%u)",
-                       g_target_fps, g_res_pct, g_rt_refl, g_daemon);
+                logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, refresh_hz=%u, output_res=%u, pro_rt_half=%u, daemon=%u)",
+                       g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_pro_rt_half, g_daemon);
             }
             rc = patch_gtavi_session(pid, titleid, first_session && poll == 0, &patches);
             first_session = 0;
