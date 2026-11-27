@@ -42,7 +42,7 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 
 | Option | Values | Default | Description |
 | --- | --- | --- | --- |
-| **`fps`** | `30`–`120` | `60` | Target FPS cap. On standard **60 Hz** output, GTAVI uses hardware V-Sync dividers (`30` = locked 30 FPS, `31`–`120` = unlocked up to 60 FPS). On **120 Hz** output (`refresh_hz=120`), supports hardware locks at `30`, `40`, `60`, or `120` FPS. |
+| **`fps`** | `30`–`120` | `60` | Target FPS cap. On standard **60 Hz** output, GTAVI uses hardware V-Sync dividers (`30` = locked 30 FPS, `31`–`120` = unlocked up to 60 FPS). On **120 Hz** output (`refresh_hz=120`), supports hardware locks at `30`, `40`, or `60` FPS (or uncapped above 60). |
 | **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of `output_res` (`0` = stock). |
 | **`refresh_hz`** | `60` / `120` | `60` | Refresh rate used by `sceVideoOutSetFlipRate`. Keep `60` for standard output; set **`120`** only if you are forcing **120 Hz output** externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system) (enables hardware-locked **40 FPS** with `fps=40`; using `120` on a 60 Hz signal will halve FPS). |
 | **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Overrides the swapchain output buffer resolution (`0` = stock 4K `3840×2160`, `1440` = `2560×1440`, `1080` = `1920×1080`). See [SETTINGS.md](SETTINGS.md) for `res_pct` combinations. |
@@ -51,9 +51,10 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 
 ### `res_pct` Reference Values (4K Output)
 
-| `res_pct` | Internal Resolution | Notes |
+> **Allocator limit:** GTAVI sizes its internal render target pool proportionally to `output_res` expecting stock ratios (**`<= 67%`** on base PS5, **`<= 60%`** on PS5 Pro). Values above those limits (e.g. `75`–`100`) overflow the pool and crash on boot (`OnOutOfMemory`).
+
+| `res_pct` | Internal Resolution (at 4K `output_res=0`) | Notes |
 | --- | --- | --- |
-| `100` | `3840×2160` *(Native 4K)* | **Experimental** — 2.25× more pixels than stock 1440p; very heavy on GPU and VRAM (may hit low FPS or render-target pool OOM). |
 | `67` | `2560×1440` | **Stock PS5 Fat/Slim** (`TAA2U`). **Do not use on PS5 Pro** with stock RT — exceeds Pro's transient RT pool (`0x08930da7` crash on boot); use `0` for stock PS5 Pro (`2240×1260`). |
 | `60` | `2304×1296` | Sharper middle ground (safe upper limit tested on **PS5 Pro** PSSR). |
 | `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |

@@ -2,6 +2,8 @@
 
 Copy any preset below into `/data/gtavi-unlockfps/fps.txt` over FTP. If `daemon=1` is enabled, changes take effect automatically the next time you restart GTAVI (no need to reload the `.elf`).
 
+> **Important `res_pct` limit:** GTAVI sizes its internal render target memory pool proportionally to `output_res`, expecting stock scale ratios (**`<= 67%`** on base PS5 Fat/Slim, **`<= 60%`** on PS5 Pro). Setting `res_pct` above those limits (e.g. `75` or `100`) overflows the allocator pool and crashes on boot (`OnOutOfMemory`), even when `output_res` is `1440` or `1080`.
+
 ---
 
 ## PS5 Fat / Slim
@@ -16,7 +18,7 @@ pro_rt_half=0
 daemon=1
 ```
 * Renders internally at **`1920×1080`** and upscales to 4K via `TAA2U` (~44–50+ FPS, pairs well with PS5 VRR 48–60 Hz).
-* For a slightly sharper image at the cost of a few FPS, try `res_pct=55` (`2112×1188`).
+* For a slightly sharper image at the cost of a few FPS, try `res_pct=55` (`2112×1188`) or `60` (`2304×1296`).
 
 ### 2. Locked 40 FPS on 120 Hz Displays *(Balanced Sharpness & Smoothness)*
 ```ini
@@ -30,27 +32,16 @@ daemon=1
 * **Requires forcing 120 Hz output externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system)** (GTAVI does not switch HDMI to 120 Hz on its own; setting `refresh_hz=120` on a 60 Hz signal will cap FPS to 20).
 * Locks hardware V-Sync to an even **`40.00 FPS`** (`120 / 3`) at **`2112×1188` → `TAA2U` 4K** (`res_pct=50` if you want extra headroom in dense city scenes).
 
-### 3. Maximum FPS / 1080p Monitor *(Experimental)*
+### 3. 1440p Monitor (No 4K Double-Scaling) *(Experimental)*
 ```ini
 fps=60
-res_pct=100
-refresh_hz=60
-output_res=1080
-pro_rt_half=0
-daemon=1
-```
-* Native 1:1 **`1920×1080`** output—skips 4K `TAA2U` upscaling and 4K post-processing for extra GPU headroom on base PS5.
-
-### 4. 1440p Monitor (No 4K Double-Scaling) *(Experimental)*
-```ini
-fps=60
-res_pct=75
+res_pct=0
 refresh_hz=60
 output_res=1440
 pro_rt_half=0
 daemon=1
 ```
-* Renders internally at **`1920×1080`** and outputs natively to **`2560×1440`** (avoids `1440p → 4K → 1440p` scaling). Use `res_pct=100` for native 1:1 `2560×1440` (closer to stock 30–35 FPS).
+* Outputs natively at **`2560×1440`** with stock `67%` internal scaling (`1706×960` → `1440p`), avoiding 4K upscaling/downscaling on 1440p monitors and saving GPU time on post-processing/HUD. Keep `res_pct` at `0` (or `<= 67`).
 
 ---
 
@@ -94,13 +85,12 @@ daemon=1
 
 ## Combining `output_res` with `res_pct`
 
-`res_pct` scales relative to **`output_res`** (not always 4K), so adjust `res_pct` accordingly when changing `output_res`:
+`res_pct` always scales relative to **`output_res`** and must stay within the game's allocator ratio (**`0` or `<= 67`** on base PS5, **`0` or `<= 60`** on PS5 Pro):
 
-| `output_res` | `res_pct` | Effective Internal → Output | Use Case |
+| `output_res` | `res_pct` | Effective Internal → Output | Notes |
 | --- | --- | --- | --- |
 | `0` *(4K)* | `50` | `1920×1080` → `3840×2160` | **Default** — best balance on 4K TVs. |
-| `1440` | `100` | `2560×1440` → `2560×1440` | Native 1:1 1440p on 1440p monitors (no 4K double-scaling). |
-| `1440` | `75` | `1920×1080` → `2560×1440` | 1080p internal upscaled cleanly to 1440p (high FPS on 1440p displays). |
-| `1080` | `100` | `1920×1080` → `1920×1080` | Native 1:1 1080p (skips 4K upscaling/post-FX for maximum FPS on base PS5). |
-
-> **Tip:** Avoid leaving `res_pct=50` when using `output_res=1080` unless you intentionally want `960×540` internal resolution!
+| `0` *(4K)* | `55` / `60` | `2112×1188` / `2304×1296` → `3840×2160` | Sharper 4K output (works on PS5 & PS5 Pro). |
+| `1440` | `0` *(stock)* | `1706×960` (PS5) / `1493×840` (Pro) → `2560×1440` | Native 1440p output without 4K upscaling/post-FX. |
+| `1440` | `60` | `1536×864` → `2560×1440` | Confirmed working on PS5 Pro (`67%+` crashes with OOM). |
+| `1080` | `0` *(stock)* | `1280×720` → `1920×1080` | Native 1080p output (lightest GPU load; `> 67%` crashes with OOM). |
