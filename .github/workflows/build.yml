@@ -4,6 +4,7 @@ on:
   push:
     paths-ignore:
       - 'README.md'
+      - 'SETTINGS.md'
       - 'repo.json'
       - 'icons.json'
   workflow_dispatch:
@@ -23,6 +24,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 llvm-18-dev make wget unzip
           wget -q -O /tmp/sdk.zip https://github.com/ps5-payload-dev/sdk/releases/download/v0.43/ps5-payload-sdk.zip
           sudo unzip -q -d /opt /tmp/sdk.zip
+
+      - name: Run host unit tests
+        run: |
+          clang-18 -DHOST_TEST -Wall -Wextra -Werror -Os src/test_resolution.c -o /tmp/test_resolution
+          /tmp/test_resolution
 
       - name: Build ELF payload
         env:

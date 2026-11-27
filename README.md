@@ -20,7 +20,7 @@ A lightweight `.elf` runtime payload for jailbroken **PlayStation 5** & **PS5 Pr
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.15.elf` through your Payload Manager (PLDMGR / `elfldr`).
+1. Load `GTAVI UnlockFPS_v1.16.elf` through your Payload Manager (PLDMGR / `elfldr`).
 2. A PS5 notification will appear confirming the payload is ready and waiting for GTAVI (`PPSA01547` / `PPSA29660` / `PPSA38500`) to launch *(up to 10 minutes in one-shot mode, or indefinitely when `daemon=1`)*.
 3. Start GTAVI *(load the payload **before** starting the game so `TAA2U` / `PSSR` scaling and optional buffer/RT settings apply before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and either exits automatically (`daemon=0`) or stays running in the background to re-patch future launches (`daemon=1`).
@@ -36,6 +36,12 @@ refresh_hz=60
 output_res=0
 pro_rt_half=0
 daemon=0
+pro_highres=0
+close_fix=1
+pro_taa2u=0
+low_shadows=0
+low_volumetric=0
+base_highres=0
 ```
 
 Edit over FTP without rebuilding (out-of-range values are logged and fall back to their defaults):
@@ -43,10 +49,16 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 | Option | Values | Default | Description |
 | --- | --- | --- | --- |
 | **`fps`** | `30`–`120` | `60` | Target FPS cap. On standard **60 Hz** output, GTAVI uses hardware V-Sync dividers (`30` = locked 30 FPS, `31`–`120` = unlocked up to 60 FPS). On **120 Hz** output (`refresh_hz=120`), supports hardware locks at `30`, `40`, or `60` FPS (or uncapped above 60). |
-| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of `output_res` (`0` = stock). |
+| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of `output_res` (`0` = stock). Always rounds to even width/height to avoid half-res RT reflection speckles. |
 | **`refresh_hz`** | `60` / `120` | `60` | Refresh rate used by `sceVideoOutSetFlipRate`. Keep `60` for standard output; set **`120`** only if you are forcing **120 Hz output** externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system) (enables hardware-locked **40 FPS** with `fps=40`; using `120` on a 60 Hz signal will halve FPS). |
 | **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Overrides the swapchain output buffer resolution (`0` = stock 4K `3840×2160`, `1440` = `2560×1440`, `1080` = `1920×1080`). See [SETTINGS.md](SETTINGS.md) for `res_pct` combinations. |
 | **`pro_rt_half`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Lowers PS5 Pro's RT Reflections from full-res (Tier 3) to half-res (matching base PS5) for extra FPS and RT pool headroom while keeping **PSSR** and intact ocean water. |
+| **`pro_highres`** | `0` / `1` | `0` | *(PS5 Pro, 4K output)* Expands the transient render heap and Pro heap #2 before game init so `res_pct` above stock (`67`–`100`, up to native 4K) runs with full RT. |
+| **`close_fix`** | `0` / `1` | `1` | Bypasses the `SPACECHECK00.dat` probe on save/exit to prevent the `CE-108255-1` error when closing the game (`1` = enabled by default). |
+| **`pro_taa2u`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Switches PS5 Pro from **PSSR** to **TAA2U** upscaling for extra GPU headroom or less foliage shimmer. |
+| **`low_shadows`** | `0` / `1` | `0` | *(Experimental)* Forces Shadow Map resolution to Tier 1 (`1280`) for lower GPU and memory bandwidth load on PS5 & PS5 Pro. |
+| **`low_volumetric`** | `0` / `1` | `0` | *(Experimental)* Lowers volumetric / reflection map resolution from `256` (8 mips) to `128` (7 mips). |
+| **`base_highres`** | `0` / `1` | `0` | *(Experimental, Base PS5)* Expands base PS5 transient render heap (`728` → `896 MB`) and heap #2 (`+256 MB`) before init for higher `res_pct` ratios. |
 | **`daemon`** | `0` / `1` | `0` | `0` = one-shot (waits up to 10 min and exits); `1` = stays in the background, reloads `fps.txt` and automatically re-patches GTAVI across game restarts. |
 
 ### `res_pct` Reference Values (4K Output)
@@ -93,7 +105,7 @@ Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes th
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.15.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.16.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh
@@ -108,4 +120,6 @@ Every code push automatically builds the payload via [`.github/workflows/build.y
 ## Credits
 
 * **[armanate](https://github.com/armanate/rdr2-60fps-runtime-patcher)** — runtime payload architecture, process/context verification, and DMAP page-table write logic.
+* **[OverkillLabs3](https://github.com/OverkillLabs3)** — `pro_highres` PS5 Pro heap expansion, even render-resolution rounding (`compute_resolution`), and resolution unit tests ([PR #16](https://github.com/HSgod/ps5-fpsunlocker-gta6/pull/16)).
 * **a_Criminai** — additional `fwTimer` / region offsets referenced from the XML patch.
+* **[Eizovoid](https://github.com/Eizovoid/gta-vi-ps5-patches)** — root-cause lead for the `CE-108255-1` close-game error (reimplemented here as a full `SPACECHECK00.dat` probe bypass).

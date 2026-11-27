@@ -109,3 +109,14 @@ pro_highres=1
 | `1440` | `0` *(stock)* | `1706×960` (PS5) / `1493×840` (Pro) → `2560×1440` | Native 1440p output without 4K upscaling/post-FX. |
 | `1440` | `60` | `1536×864` → `2560×1440` | Confirmed working on PS5 Pro (`67%+` crashes with OOM). |
 | `1080` | `0` *(stock)* | `1280×720` → `1920×1080` | Native 1080p output (lightest GPU load; `> 67%` crashes with OOM). |
+
+---
+
+## Experimental GPU & Memory Tweaks *(v1.16)*
+
+All options below default to **`0` (off)** and can be combined with any preset above (load the payload **before** starting GTAVI):
+
+* **`pro_taa2u=1`** *(PS5 Pro)* — switches PS5 Pro from **PSSR** to **TAA2U** upscaling for extra GPU headroom or less foliage shimmer.
+* **`low_shadows=1`** *(PS5 & PS5 Pro)* — lowers Shadow Map resolution to Tier 1 (`1280`) to reduce GPU and memory bandwidth load.
+* **`low_volumetric=1`** *(PS5 & PS5 Pro)* — lowers volumetric / reflection map resolution from `256` (8 mips) to `128` (7 mips).
+* **`base_highres=1`** *(Base PS5)* — expands base PS5 transient render heap (`728` → `896 MB`) and heap #2 (`+256 MB`) before init for higher `res_pct` ratios (e.g. testing `output_res=1440` with `res_pct=75–100`).
