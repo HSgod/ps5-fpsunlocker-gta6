@@ -20,6 +20,7 @@
  */
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -78,6 +79,30 @@ static const char *const WANT_TITLE_IDS[] = {
 /* Background daemon mode:
  * 0 = one-shot (wait up to 10 min, patch once, exit), 1 = stay in background across restarts. */
 #define DEFAULT_DAEMON      0u
+
+/* PS5 Pro above-stock resolution (pro_highres=1). The 67%+ crash (int 0x41, RVA 0x8530da7) is
+ * the transient render heap (0x3550 x 64 KB pages, set at boot) being too small. It is raised
+ * before init, its page array is moved above 1 GB, heap #2 gets +512 MB, and the main pool
+ * shrinks by the same total. Measured peak: 883 MB at 2572x1447, 1066 MB at 2752x1548. */
+#define DEFAULT_PRO_HIGHRES 0u
+#define HEAP_PAGES_RVA      0x3e0fb71u /* imm32 of 'mov eax, 0x3550' (Pro page count)   */
+#define HEAP_SIZE_G_RVA     0xe3d1f20u /* qword: heap pages, 0 until the heap is created */
+#define HEAP_PAGES_STOCK    0x3550u
+#define HEAP_PAGES_ARRAY    0x4000u    /* stock page pointer array 0xe3d1f50 capacity    */
+#define NEW_ARRAY_RVA       0xdb10000u /* unused zero region (no code refs) for the array */
+#define NEW_ARRAY_END_RVA   0xdc87000u
+#define HEAP_PAGES_MAX      ((NEW_ARRAY_END_RVA - NEW_ARRAY_RVA) / 8u)
+#define LEA1_RVA            0x3e0fb7eu /* lea r15, [page array] (heap creation)          */
+#define LEA2_RVA            0x85310e3u /* lea rcx, [page array] (per-frame page mapping) */
+#define HEAP2_RVA           0x9d65778u /* Pro row of per-platform heap table, heap #2     */
+#define HEAP2_STOCK         0xc4700000ull
+#define HEAP2_ADD           0x20000000ull /* +512 MB, needed above ~70% */
+#define POOL_STOCK          0x185c00000ull
+#define HEAP_MARGIN_MB      24.0
+static const uint32_t POOL_RVAS[10] = {
+    0xc7a3e1u, 0xc7a627u, 0x148f3b7u, 0x64a230eu, 0x67a2cf2u,
+    0x8480de4u, 0x84811d7u, 0x85443a4u, 0x8b032ecu, 0x8b03968u
+};
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA       0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -251,6 +276,7 @@ static const uint8_t PRO_RT_HALF_CTX[64] = {
 #define LOCK_PORT 47961 /* loopback UDP port held as a single-instance lock */
 
 #define POLL_USEC      100000u /* 100 ms: fast enough to beat render init, gentle on shell */
+#define FAST_POLL_USEC 1000u   /* 1 ms with pro_highres: freeze GTAVI before its heap init */
 #define IDLE_POLL_USEC 500000u /* 500 ms: daemon sleep while GTAVI is already patched */
 #define WAIT_POLLS     6000u   /* 6000 * 100 ms = 10 min (one-shot mode) */
 #define LIST_TRIES    5u
@@ -290,6 +316,10 @@ static uint32_t g_refresh_hz = DEFAULT_REFRESH_HZ;
 static uint32_t g_output_res = DEFAULT_OUTPUT_RES;
 static uint32_t g_pro_rt_half = DEFAULT_PRO_RT_HALF;
 static uint32_t g_daemon = DEFAULT_DAEMON;
+static uint32_t g_pro_highres = DEFAULT_PRO_HIGHRES;
+static float g_scale;            /* final render scale (even width and height) */
+static uint32_t g_res_w, g_res_h;  /* resulting internal resolution */
+static uint32_t g_heap_pages;      /* 0 = leave the heap stock */
 
 static unsigned long elapsed_ms(void) {
     struct timespec t;
@@ -371,8 +401,10 @@ static void load_settings(void) {
     int saw_output_res = 0;
     int saw_pro_rt_half = 0;
     int saw_daemon = 0;
+    int saw_pro_highres = 0;
     FILE *f;
 
+    g_pro_highres = DEFAULT_PRO_HIGHRES;
     g_target_fps = DEFAULT_FPS;
     g_res_pct = DEFAULT_RES_PCT;
     g_refresh_hz = DEFAULT_REFRESH_HZ;
@@ -393,14 +425,17 @@ static void load_settings(void) {
                        "# output_res: 0 = stock 4K (default), 1440 = 2560x1440, 1080 = 1920x1080 (experimental)\n"
                        "# pro_rt_half: 0 = stock (default), 1 = PS5 Pro half-res RT Reflections (experimental)\n"
                        "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
+                       "# pro_highres: 0 = off (default), 1 = PS5 Pro res_pct above stock (up to ~70%%, needs 4K output)\n"
                        "fps=%u\n"
                        "res_pct=%u\n"
                        "refresh_hz=%u\n"
                        "output_res=%u\n"
                        "pro_rt_half=%u\n"
-                       "daemon=%u\n",
+                       "daemon=%u\n"
+                       "pro_highres=%u\n",
                        DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_REFRESH_HZ,
-                       DEFAULT_OUTPUT_RES, DEFAULT_PRO_RT_HALF, DEFAULT_DAEMON);
+                       DEFAULT_OUTPUT_RES, DEFAULT_PRO_RT_HALF, DEFAULT_DAEMON,
+                       DEFAULT_PRO_HIGHRES);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -447,6 +482,13 @@ static void load_settings(void) {
             } else {
                 logmsg("WARN", "ignoring pro_rt_half=%d (must be 0 or 1)", v);
             }
+        } else if (!strncmp(line, "pro_highres", 11)) {
+            saw_pro_highres = 1;
+            if (v == 0 || v == 1) {
+                g_pro_highres = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring pro_highres=%d (must be 0 or 1)", v);
+            }
         } else if (!strncmp(line, "daemon", 6)) {
             saw_daemon = 1;
             if (v == 0 || v == 1) {
@@ -459,9 +501,15 @@ static void load_settings(void) {
     }
     fclose(f);
 
-    if (!saw_res_pct || !saw_refresh_hz || !saw_output_res || !saw_pro_rt_half || !saw_daemon) {
+    if (!saw_res_pct || !saw_refresh_hz || !saw_output_res || !saw_pro_rt_half || !saw_daemon ||
+        !saw_pro_highres) {
         f = fopen(CONF_PATH, "a");
         if (f) {
+            if (!saw_pro_highres) {
+                fprintf(f, "# pro_highres: 0 = off (default), 1 = PS5 Pro res_pct above stock (up to ~70%%, needs 4K output)\n"
+                           "pro_highres=%u\n", DEFAULT_PRO_HIGHRES);
+                logmsg("INFO", "appended default pro_highres=%u to %s", DEFAULT_PRO_HIGHRES, CONF_PATH);
+            }
             if (!saw_res_pct) {
                 fprintf(f, "# res_pct: internal resolution %% (0=stock, 50=1080p, 25..49=experimental)\n"
                            "res_pct=%u\n", DEFAULT_RES_PCT);
@@ -827,8 +875,79 @@ static void format_opt_flags(char *buf, size_t sz) {
         len += (size_t)snprintf(buf + len, sz - len, ", Pro RT Half");
 }
 
+/* Transient heap pages needed for a w x h internal resolution at 4K output, from two
+ * measured peaks (883 MB @ 2572x1447, 1066 MB @ 2752x1548) plus a safety margin. */
+static uint32_t heap_pages_for(uint32_t w, uint32_t h) {
+    double mb = 340.8 * ((double)w * (double)h / 1e6) - 385.5 + HEAP_MARGIN_MB;
+    uint32_t pages = (uint32_t)(mb * 16.0) + 1u; /* 16 pages of 64 KB per MB */
+    return pages;
+}
+
+/* Pick the render scale: closest to res_pct with EVEN width and height (odd sizes break
+ * half-res reflection buffers -> green speckles). With pro_highres, also size the heap and
+ * step the resolution down until it fits in HEAP_PAGES_MAX. */
+static void compute_resolution(void) {
+    uint32_t ow = 3840u, oh = 2160u;
+    int h0, d, k, step_down = 0;
+
+    g_scale = 0.0f;
+    g_res_w = g_res_h = 0;
+    g_heap_pages = 0;
+    if (g_res_pct == 0)
+        return;
+    if (g_output_res == 1440) { ow = 2560u; oh = 1440u; }
+    if (g_output_res == 1080) { ow = 1920u; oh = 1080u; }
+
+    h0 = (int)(oh * g_res_pct / 100u) & ~1;
+    for (;;) {
+        /* search 0,+2,-2,+4,-4.. around the target; only downward once stepping down */
+        for (k = 0; k <= 40; k++) {
+            int h;
+            d = step_down ? -2 * k : ((k & 1) ? k + 1 : -k);
+            h = h0 + d;
+            volatile float s, fw, fh;
+            uint32_t w2, h2;
+            if (h < 64)
+                continue;
+            s = ((float)h + 0.25f) / (float)oh;
+            fw = (float)ow * s; /* same single-precision math as the game */
+            fh = (float)oh * s;
+            w2 = (uint32_t)fw;
+            h2 = (uint32_t)fh;
+            if ((w2 & 1u) || h2 != (uint32_t)h)
+                continue;
+            g_scale = s;
+            g_res_w = w2;
+            g_res_h = h2;
+            break;
+        }
+        if (!g_scale) {
+            logmsg("WARN", "no even resolution near res_pct=%u; using plain scale", g_res_pct);
+            g_scale = (float)g_res_pct / 100.0f;
+            g_res_w = (uint32_t)((float)ow * g_scale);
+            g_res_h = (uint32_t)((float)oh * g_scale);
+            return;
+        }
+        if (!g_pro_highres || g_output_res != 0)
+            return;
+        g_heap_pages = heap_pages_for(g_res_w, g_res_h);
+        if (g_heap_pages <= HEAP_PAGES_STOCK) {
+            g_heap_pages = 0; /* fits the stock heap */
+            return;
+        }
+        if (g_heap_pages <= HEAP_PAGES_MAX)
+            return;
+        logmsg("INFO", "%ux%u needs %u heap pages (max 0x%x); stepping down",
+               g_res_w, g_res_h, g_heap_pages, HEAP_PAGES_MAX);
+        h0 = (int)g_res_h - 2;
+        step_down = 1;
+        g_scale = 0.0f;
+    }
+}
+
 static void build_patches(struct patch_bundle *b) {
     memset(b, 0, sizeof(*b));
+    compute_resolution();
 
     /* FPS cap writers:
      *   Site 1 (6B): mov eax, <fps>; nop          -> b8 <imm32> 90
@@ -882,7 +1001,7 @@ static void build_patches(struct patch_bundle *b) {
             0x89,0x87,0x94,0x00,0x00,0x00,
             0xc3
         };
-        float scale_f = (float)g_res_pct / 100.0f;
+        float scale_f = g_scale;
         b->taa2u.patch[0] = 0xb8;
         put32le(b->taa2u.patch + 1, float_bits(scale_f));
         memcpy(b->taa2u.patch + 5, store_ret, sizeof(store_ret));
@@ -898,7 +1017,7 @@ static void build_patches(struct patch_bundle *b) {
     b->pssr.ctx = PSSR_CTX;
     if (g_res_pct > 0) {
         static const uint8_t movd_jmp[6] = { 0xc5,0xf9,0x6e,0xc0,0xeb,0x37 };
-        float scale_f = (float)g_res_pct / 100.0f;
+        float scale_f = g_scale;
         b->pssr.patch[0] = 0xb8;
         put32le(b->pssr.patch + 1, float_bits(scale_f));
         memcpy(b->pssr.patch + 5, movd_jmp, sizeof(movd_jmp));
@@ -952,8 +1071,116 @@ static void build_patches(struct patch_bundle *b) {
     b->pro_rt_half.patch[2] = 0x90;
 }
 
+/* Raise the transient render heap and shrink the main pool by the same amount.
+ * Must run before GTAVI creates the heap (process frozen right after it appears).
+ * Returns 1 if the heap is (now) large enough for g_res_w x g_res_h, 0 otherwise. */
+static int apply_highres_heap(uint32_t pid, uint64_t base) {
+    static const uint8_t heap_stock[9] = { 0x50,0x35,0x00,0x00, 0xbb,0x80,0x2d,0x00,0x00 };
+    uint8_t cur[9], q[8], imm[4];
+    uint64_t heap_now = 0, extra, pool_new;
+    unsigned i;
+    int relocate;
+
+    if (!g_heap_pages)
+        return 1;
+    if (proc_read(pid, base + HEAP_SIZE_G_RVA, q, 8))
+        return 0;
+    memcpy(&heap_now, q, 8);
+    if (heap_now) {
+        logmsg("WARN", "render heap already created (%llu pages): too late to enlarge it",
+               (unsigned long long)heap_now);
+        return heap_now >= g_heap_pages;
+    }
+    if (proc_read(pid, base + HEAP_PAGES_RVA, cur, 9) || memcmp(cur, heap_stock, 9)) {
+        logmsg("WARN", "heap size site does not match the supported build");
+        return 0;
+    }
+    for (i = 0; i < 10; i++) {
+        uint64_t v;
+        if (proc_read(pid, base + POOL_RVAS[i], q, 8))
+            return 0;
+        memcpy(&v, q, 8);
+        if (v != POOL_STOCK) {
+            logmsg("WARN", "main pool site %u does not match the supported build", i);
+            return 0;
+        }
+    }
+    relocate = g_heap_pages > HEAP_PAGES_ARRAY;
+    if (relocate) {
+        static const uint8_t lea1[7] = { 0x4c,0x8d,0x3d,0xcb,0x23,0x5c,0x0a };
+        static const uint8_t lea2[7] = { 0x48,0x8d,0x0d,0x66,0x0e,0xea,0x05 };
+        uint64_t h2 = 0;
+        uint8_t *zero;
+        int clean = 0;
+        if (proc_read(pid, base + LEA1_RVA, cur, 7) || memcmp(cur, lea1, 7) ||
+            proc_read(pid, base + LEA2_RVA, cur, 7) || memcmp(cur, lea2, 7) ||
+            proc_read(pid, base + HEAP2_RVA, q, 8)) {
+            logmsg("WARN", "page array / heap #2 sites do not match the supported build");
+            return 0;
+        }
+        memcpy(&h2, q, 8);
+        if (h2 != HEAP2_STOCK) {
+            logmsg("WARN", "heap #2 size is not stock");
+            return 0;
+        }
+        zero = malloc((size_t)g_heap_pages * 8u);
+        if (zero && !proc_read(pid, base + NEW_ARRAY_RVA, zero, g_heap_pages * 8u)) {
+            clean = 1;
+            for (i = 0; i < g_heap_pages * 8u; i++)
+                if (zero[i]) { clean = 0; break; }
+        }
+        free(zero);
+        if (!clean) {
+            logmsg("WARN", "new page array region is not free");
+            return 0;
+        }
+    }
+
+    extra = (uint64_t)(g_heap_pages - HEAP_PAGES_STOCK) * 0x10000u + (relocate ? HEAP2_ADD : 0u);
+    pool_new = POOL_STOCK - ((extra + 0x1fffffu) & ~(uint64_t)0x1fffffu);
+    /* Order keeps every partial failure safe: shrink pool first, grow heaps last. */
+    for (i = 0; i < 10; i++) {
+        memcpy(q, &pool_new, 8);
+        if (proc_write(pid, base + POOL_RVAS[i], q, 8) ||
+            proc_read(pid, base + POOL_RVAS[i], cur, 8) || memcmp(cur, q, 8)) {
+            logmsg("WARN", "main pool write %u failed", i);
+            return 0; /* heap left stock: the game still boots at stock size */
+        }
+    }
+    if (relocate) {
+        static const uint32_t lea_rva[2] = { LEA1_RVA, LEA2_RVA };
+        uint64_t h2 = HEAP2_STOCK + HEAP2_ADD;
+        for (i = 0; i < 2; i++) {
+            put32le(imm, (uint32_t)((int32_t)NEW_ARRAY_RVA - (int32_t)(lea_rva[i] + 7u)));
+            if (proc_write(pid, base + lea_rva[i] + 3u, imm, 4) ||
+                proc_read(pid, base + lea_rva[i] + 3u, cur, 4) || memcmp(cur, imm, 4)) {
+                logmsg("WARN", "page array lea %u write failed", i);
+                return 0;
+            }
+        }
+        memcpy(q, &h2, 8);
+        if (proc_write(pid, base + HEAP2_RVA, q, 8) ||
+            proc_read(pid, base + HEAP2_RVA, cur, 8) || memcmp(cur, q, 8)) {
+            logmsg("WARN", "heap #2 write failed");
+            return 0;
+        }
+        logmsg("OK", "page array moved, heap #2 %llu -> %llu MB",
+               (unsigned long long)(HEAP2_STOCK >> 20), (unsigned long long)(h2 >> 20));
+    }
+    put32le(imm, g_heap_pages);
+    if (proc_write(pid, base + HEAP_PAGES_RVA, imm, 4) ||
+        proc_read(pid, base + HEAP_PAGES_RVA, cur, 4) || memcmp(cur, imm, 4)) {
+        logmsg("WARN", "heap size write failed");
+        return 0;
+    }
+    logmsg("OK", "render heap %u -> %u MB, main pool %llu -> %llu MB",
+           HEAP_PAGES_STOCK / 16u, g_heap_pages / 16u,
+           (unsigned long long)(POOL_STOCK >> 20), (unsigned long long)(pool_new >> 20));
+    return 1;
+}
+
 static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_open,
-                               const struct patch_bundle *b) {
+                               struct patch_bundle *b) {
     uint64_t base = 0;
     int already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
@@ -977,6 +1204,18 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     }
     logmsg("OK", "GTAVI verified: %s pid %u base 0x%llx", titleid, pid,
            (unsigned long long)base);
+
+    if (g_heap_pages && !apply_highres_heap(pid, base)) {
+        /* Heap could not be enlarged: fall back to the largest even size below stock. */
+        g_res_pct = 66u;
+        g_pro_highres = 0u;
+        build_patches(b);
+        notify("high-res heap not applied; using %ux%u. Start GTAVI after this payload.",
+               g_res_w, g_res_h);
+    }
+    if (g_res_pct > 0)
+        logmsg("INFO", "internal resolution %ux%u (scale %.5f)", g_res_w, g_res_h,
+               (double)g_scale);
 
     /* Patch output resolution, TAA2U/PSSR scale, and Pro RT Half-Res first so
      * they beat swapchain and render target allocation. */
@@ -1095,7 +1334,8 @@ int main(void) {
             notify("ready (Res stock%s). Start GTAVI within 10 min.", flags);
     }
 
-    for (poll = 0; g_daemon || poll < WAIT_POLLS; poll++) {
+    for (poll = 0; g_daemon || (g_heap_pages ? elapsed_ms() < WAIT_POLLS * (POLL_USEC / 1000u)
+                                              : poll < WAIT_POLLS); poll++) {
         uint32_t pid = 0;
         char titleid[16] = "?";
 
@@ -1150,7 +1390,20 @@ int main(void) {
                 logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, refresh_hz=%u, output_res=%u, pro_rt_half=%u, daemon=%u)",
                        g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_pro_rt_half, g_daemon);
             }
+            /* Freeze GTAVI before it creates its render heap; always resumed below. */
+            int frozen = 0;
+#ifndef HOST_TEST
+            if (g_heap_pages && !kill((pid_t)pid, SIGSTOP))
+                frozen = 1;
+#endif
+            if (g_heap_pages)
+                logmsg(frozen ? "OK" : "WARN", "GTAVI pid %u %s", pid,
+                       frozen ? "frozen for heap patch" : "could not be frozen");
             rc = patch_gtavi_session(pid, titleid, first_session && poll == 0, &patches);
+#ifndef HOST_TEST
+            if (frozen && kill((pid_t)pid, SIGCONT))
+                logmsg("WARN", "SIGCONT to pid %u failed", pid);
+#endif
             first_session = 0;
             if (!g_daemon)
                 return finish(rc);
@@ -1159,9 +1412,9 @@ int main(void) {
             continue;
         }
 
-        if (!g_daemon && poll && poll % 300u == 0)
+        if (!g_daemon && !g_heap_pages && poll && poll % 300u == 0)
             logmsg("INFO", "still waiting for GTAVI (%u s)", poll / 10u);
-        usleep(POLL_USEC);
+        usleep(g_heap_pages ? FAST_POLL_USEC : POLL_USEC);
     }
 
     notify("GTAVI was not started within 10 min. Closed.");
