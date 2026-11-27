@@ -1,6 +1,6 @@
 {
   "name": "GTA VI FPS Unlocker (PS5)",
-  "icons_url": "https://raw.githubusercontent.com/HSgod/ps5-fpsunlocker-gta6/main/icons.json",
+  "icons_url": "icons.json?v=2",
   "payloads": [
     {
       "id": "gtavi-unlockfps",
@@ -13,7 +13,9 @@
       "category": "Game Patches",
       "checksum": "09258095452838e6e38e2e5301dc534eb215f48e1288e1a980b555d1e82eb48b",
       "author": "HSgod",
-      "icon_key": "gtavi-unlockfps"
+      "icon_key": "gtavi-unlockfps",
+      "details_url": "https://raw.githubusercontent.com/HSgod/ps5-fpsunlocker-gta6/main/README.md",
+      "source": "https://github.com/HSgod/ps5-fpsunlocker-gta6"
     }
   ]
 }
