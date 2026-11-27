@@ -4,6 +4,8 @@ on:
   push:
     paths-ignore:
       - 'README.md'
+      - 'repo.json'
+      - 'icons.json'
   workflow_dispatch:
 
 permissions:
@@ -59,4 +61,34 @@ jobs:
             gh release upload "$TAG" src/*.elf --clobber
           else
             gh release create "$TAG" src/*.elf --title "GTAVI Unlock FPS ${TAG}" --notes "$NOTES" $REL_FLAG
+          fi
+
+          if [ "$REL_FLAG" = "--latest" ]; then
+            ELF_PATH=$(ls src/*.elf | head -n 1)
+            ELF_NAME=$(basename "$ELF_PATH")
+            SHA256=$(sha256sum "$ELF_PATH" | awk '{print $1}')
+            DL_URL=$(gh release view "$TAG" --json assets -q '.assets[0].url')
+            TODAY=$(date -u +%Y-%m-%d)
+            python3 - "$TAG" "$ELF_NAME" "$DL_URL" "$SHA256" "$TODAY" << 'PYEOF'
+          import json, sys
+          tag, fname, url, sha, today = sys.argv[1:6]
+          with open("repo.json", "r") as f:
+              data = json.load(f)
+          p = data["payloads"][0]
+          p["version"] = tag
+          p["filename"] = fname
+          p["url"] = url
+          p["checksum"] = sha
+          p["last_update"] = today
+          with open("repo.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          PYEOF
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ! git diff --quiet repo.json; then
+              git add repo.json
+              git commit -m "chore: update repo.json for ${TAG} [skip ci]"
+              git push origin HEAD:main
+            fi
           fi

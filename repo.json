@@ -1,0 +1,19 @@
+{
+  "name": "GTA VI FPS Unlocker (PS5)",
+  "icons_url": "https://raw.githubusercontent.com/HSgod/ps5-fpsunlocker-gta6/main/icons.json",
+  "payloads": [
+    {
+      "id": "gtavi-unlockfps",
+      "name": "GTA VI FPS Unlocker",
+      "filename": "GTAVI UnlockFPS_v1.15.elf",
+      "url": "https://github.com/HSgod/ps5-fpsunlocker-gta6/releases/download/v1.15/GTAVI.UnlockFPS_v1.15.elf",
+      "description": "Unlocks the 30 FPS cap, fixes delta-time speed, and adds customizable TAA2U/PSSR scaling, 120 Hz flip-rate support, and background daemon mode for GTA VI on PS5 & PS5 Pro.",
+      "version": "v1.15",
+      "last_update": "2026-11-27",
+      "category": "Game Patches",
+      "checksum": "09258095452838e6e38e2e5301dc534eb215f48e1288e1a980b555d1e82eb48b",
+      "author": "HSgod",
+      "icon_key": "gtavi-unlockfps"
+    }
+  ]
+}
