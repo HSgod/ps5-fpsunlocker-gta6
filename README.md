@@ -46,28 +46,28 @@ base_highres=0
 
 Edit over FTP without rebuilding (out-of-range values are logged and fall back to their defaults):
 
-| Option | Values | Default | Description |
+| Option | Values | Default | What it does |
 | --- | --- | --- | --- |
-| **`fps`** | `30`–`120` | `60` | Target FPS cap. On standard **60 Hz** output, GTAVI uses hardware V-Sync dividers (`30` = locked 30 FPS, `31`–`120` = unlocked up to 60 FPS). On **120 Hz** output (`refresh_hz=120`), supports hardware locks at `30`, `40`, or `60` FPS (or uncapped above 60). |
-| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of `output_res` (`0` = stock). Always rounds to even width/height to avoid half-res RT reflection speckles. |
-| **`refresh_hz`** | `60` / `120` | `60` | Refresh rate used by `sceVideoOutSetFlipRate`. Keep `60` for standard output; set **`120`** only if you are forcing **120 Hz output** externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system) (enables hardware-locked **40 FPS** with `fps=40`; using `120` on a 60 Hz signal will halve FPS). |
-| **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Overrides the swapchain output buffer resolution (`0` = stock 4K `3840×2160`, `1440` = `2560×1440`, `1080` = `1920×1080`). See [SETTINGS.md](SETTINGS.md) for `res_pct` combinations. |
-| **`pro_rt_half`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Lowers PS5 Pro's RT Reflections from full-res (Tier 3) to half-res (matching base PS5) for extra FPS and RT pool headroom while keeping **PSSR** and intact ocean water. |
-| **`pro_highres`** | `0` / `1` | `0` | *(PS5 Pro, 4K output)* Expands the transient render heap and Pro heap #2 before game init so `res_pct` above stock (`67`–`100`, up to native 4K) runs with full RT. |
-| **`close_fix`** | `0` / `1` | `1` | Bypasses the `SPACECHECK00.dat` probe on save/exit to prevent the `CE-108255-1` error when closing the game (`1` = enabled by default). |
-| **`pro_taa2u`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Switches PS5 Pro from **PSSR** to **TAA2U** upscaling for extra GPU headroom or less foliage shimmer. |
-| **`low_shadows`** | `0` / `1` | `0` | *(Experimental)* Forces Shadow Map resolution to Tier 1 (`1280`) for lower GPU and memory bandwidth load on PS5 & PS5 Pro. |
-| **`low_volumetric`** | `0` / `1` | `0` | *(Experimental)* Lowers volumetric / reflection map resolution from `256` (8 mips) to `128` (7 mips). |
-| **`base_highres`** | `0` / `1` | `0` | *(Experimental, Base PS5)* Expands base PS5 transient render heap (`728` → `896 MB`) and heap #2 (`+256 MB`) before init for higher `res_pct` ratios. |
-| **`daemon`** | `0` / `1` | `0` | `0` = one-shot (waits up to 10 min and exits); `1` = stays in the background, reloads `fps.txt` and automatically re-patches GTAVI across game restarts. |
+| **`fps`** | `30`–`120` | `60` | Target framerate cap. On a **60 Hz** TV: `30` locks to 30 FPS, `60` unlocks up to 60 FPS. On a **120 Hz** TV (with `refresh_hz=120`), you can also lock to `40` FPS or go above 60. |
+| **`res_pct`** | `0`, or `25`–`100` | `50` | Internal rendering resolution (% of output). Lower = higher FPS, higher = sharper image. `50` = 1080p (default), `0` = game default. |
+| **`refresh_hz`** | `60` / `120` | `60` | Match your console's output refresh rate. Keep `60` on normal TVs; set **`120`** only if you force 120 Hz via [ps-patch-system](https://github.com/illusionyy/ps-patch-system) *(using `120` on a 60 Hz TV will cut FPS in half)*. |
+| **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Changes the game's output resolution (`0` = 4K, `1440` = 1440p, `1080` = 1080p) instead of upscaling to 4K. Useful for 1080p/1440p monitors or extra FPS. |
+| **`pro_rt_half`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Lowers Ray-Traced Reflections on PS5 Pro to base PS5 resolution for higher FPS while keeping PSSR and normal water. |
+| **`pro_highres`** | `0` / `1` | `0` | *(PS5 Pro, 4K output)* Expands PS5 Pro video memory at startup so you can use `res_pct` above `66` (up to `90` / native 4K) without crashing. |
+| **`close_fix`** | `0` / `1` | `1` | Prevents the **`CE-108255-1`** error popup when closing the game (`1` = enabled by default). |
+| **`pro_taa2u`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Uses standard TAA upscaling instead of PSSR on PS5 Pro — can improve FPS or reduce shimmering on trees/foliage. |
+| **`low_shadows`** | `0` / `1` | `0` | *(Experimental)* Lowers shadow resolution for extra FPS on both PS5 and PS5 Pro. |
+| **`low_volumetric`** | `0` / `1` | `0` | *(Experimental)* Lowers fog / volumetric lighting resolution for extra FPS on both PS5 and PS5 Pro. |
+| **`base_highres`** | `0` / `1` | `0` | *(Experimental, Base PS5)* Expands video memory on base PS5 at startup so you can test `res_pct` above `67` without crashing. |
+| **`daemon`** | `0` / `1` | `0` | `0` = runs once and closes after patching; `1` = stays in the background and automatically re-patches if you restart the game. |
 
 ### `res_pct` Reference Values (4K Output)
 
-> **Allocator limit:** GTAVI sizes its internal render target pool proportionally to `output_res` expecting stock ratios (**`<= 67%`** on base PS5, **`<= 66%`** on PS5 Pro). Values above those limits (e.g. `75`–`100`) overflow the pool and crash on boot (`OnOutOfMemory`). On PS5 Pro the limit is the fixed transient render heap (`0x08930da7`); `pro_highres=1` enlarges it (see [SETTINGS.md](SETTINGS.md)).
+> **Memory limit for high `res_pct`:** With default settings, going above **`67%`** on base PS5 or **`66%`** on PS5 Pro will crash the game on startup due to its built-in memory limit. To go higher (e.g. `70`–`100`), enable **`pro_highres=1`** (PS5 Pro, 4K output) or **`base_highres=1`** *(experimental, base PS5)* and load the payload **before** starting the game.
 
 | `res_pct` | Internal Resolution (at 4K `output_res=0`) | Notes |
 | --- | --- | --- |
-| `67` | `2574×1448` | **Stock PS5 Fat/Slim** (`TAA2U`). **On PS5 Pro** it exceeds the transient render heap (`0x08930da7` crash) unless `pro_highres=1`; use `0` for stock PS5 Pro (`2560×1440`). |
+| `67` | `2574×1448` | **Stock PS5 Fat/Slim** (`TAA2U`). Crashes on **PS5 Pro** unless `pro_highres=1` is enabled (use `0` for stock PS5 Pro `2560×1440`). |
 | `60` | `2304×1296` | Sharper middle ground (safe upper limit tested on **PS5 Pro** PSSR). |
 | `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |
 | **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than base PS5 stock, keeps all other graphics settings 100% stock. |
@@ -94,8 +94,9 @@ Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes th
 * Watches running `eboot.bin` processes strictly for `PPSA01547`, `PPSA29660`, and `PPSA38500` without touching memory of system apps or other titles.
 * Resolves the game's ASLR base address and verifies **64 bytes of surrounding context** at every patch site before writing (see [`src/gtavi-unlockfps.c`](src/gtavi-unlockfps.c) for exact RVAs).
 * **FPS Unlock & Delta-Time Speed Fix:** Patches both target FPS writer sites and lowers `fwTimer`'s minimum delta-time floor from `1/30s` to `1/3000s` (`0x39aec33e`) so gameplay runs at exact 1.0× speed at any framerate above 30 FPS.
-* **TAA2U & PSSR Render Resolution Scale:** Patches `TAA2U::Update()` (base PS5) and `PSSR::GetRenderDimensions()` (PS5 Pro) so `res_pct` scales internal resolution cleanly while keeping native `TAA2U` / `PSSR` upscaling and leaving all other graphics settings 100% stock.
-* **120 Hz Flip-Rate, Output Resolution & Pro RT Half-Res:** Optional opt-in patches for forced 120 Hz `sceVideoOutSetFlipRate` dividers, custom swapchain output dimensions (`1440p`/`1080p`), and PS5 Pro half-res RT Reflections.
+* **TAA2U & PSSR Render Resolution Scale:** Patches `TAA2U::Update()` (base PS5) and `PSSR::GetRenderDimensions()` (PS5 Pro) with even width/height rounding so `res_pct` scales internal resolution cleanly without RT reflection speckles.
+* **Close-Game `CE-108255-1` Fix (`close_fix=1`):** Bypasses the synchronous `SAVEDATAA00` / `SPACECHECK00.dat` probe (`0x65742c0`) so closing GTAVI no longer triggers `CE-108255-1`.
+* **Early Boot Freeze & Optional Tweaks:** Uses `SIGSTOP`/`SIGCONT` before engine init when boot-time options are enabled (`pro_highres`, `base_highres`, `output_res`, `pro_rt_half`, `pro_taa2u`, `low_shadows`, `low_volumetric`, plus `refresh_hz=120` flip-rate dividers).
 * Uses kernel DMAP page-table writes on FW >= 8.40, or `mdbg_copyin` on older firmwares.
 
 ## Building from Source
@@ -121,5 +122,5 @@ Every code push automatically builds the payload via [`.github/workflows/build.y
 
 * **[armanate](https://github.com/armanate/rdr2-60fps-runtime-patcher)** — runtime payload architecture, process/context verification, and DMAP page-table write logic.
 * **[OverkillLabs3](https://github.com/OverkillLabs3)** — `pro_highres` PS5 Pro heap expansion, even render-resolution rounding (`compute_resolution`), and resolution unit tests ([PR #16](https://github.com/HSgod/ps5-fpsunlocker-gta6/pull/16)).
-* **a_Criminai** — additional `fwTimer` / region offsets referenced from the XML patch.
+* **Criminai** — additional `fwTimer` / region offsets referenced from the XML patch.
 * **[Eizovoid](https://github.com/Eizovoid/gta-vi-ps5-patches)** — root-cause lead for the `CE-108255-1` close-game error (reimplemented here as a full `SPACECHECK00.dat` probe bypass).
