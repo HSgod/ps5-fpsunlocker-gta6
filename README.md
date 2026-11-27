@@ -45,7 +45,7 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 | **`fps`** | `30`–`120` | `60` | Target FPS cap. On standard **60 Hz** output, GTAVI uses hardware V-Sync dividers (`30` = locked 30 FPS, `31`–`120` = unlocked up to 60 FPS). On **120 Hz** output (`refresh_hz=120`), supports hardware locks at `30`, `40`, `60`, or `120` FPS. |
 | **`res_pct`** | `0`, or `25`–`100` | `50` | Internal `TAA2U` (PS5) / `PSSR` (PS5 Pro) render resolution as a % of `output_res` (`0` = stock). |
 | **`refresh_hz`** | `60` / `120` | `60` | Refresh rate used by `sceVideoOutSetFlipRate`. Keep `60` for standard output; set **`120`** when running in **120 Hz output mode** (enables hardware-locked **40 FPS** with `fps=40`). |
-| **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Overrides the swapchain output buffer resolution (`0` = stock 4K `3840×2160`, `1440` = `2560×1440`, `1080` = `1920×1080`). See combinations with `res_pct` below. |
+| **`output_res`** | `0` / `1440` / `1080` | `0` | *(Experimental)* Overrides the swapchain output buffer resolution (`0` = stock 4K `3840×2160`, `1440` = `2560×1440`, `1080` = `1920×1080`). See [SETTINGS.md](SETTINGS.md) for `res_pct` combinations. |
 | **`pro_rt_half`** | `0` / `1` | `0` | *(Experimental, PS5 Pro)* Lowers PS5 Pro's RT Reflections from full-res (Tier 3) to half-res (matching base PS5) for extra FPS and RT pool headroom while keeping **PSSR** and intact ocean water. |
 | **`daemon`** | `0` / `1` | `0` | `0` = one-shot (waits up to 10 min and exits); `1` = stays in the background, reloads `fps.txt` and automatically re-patches GTAVI across game restarts. |
 
@@ -61,18 +61,7 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 | `25`–`49` | `960×540` – `1881×1058` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more upscaling shimmering). |
 | `0` | Stock (`2560×1440` PS5 / `2240×1260` Pro) | Leaves internal resolution completely untouched. |
 
-### Combining `output_res` with `res_pct`
-
-`res_pct` scales relative to **`output_res`** (not always 4K), so adjust `res_pct` accordingly when changing `output_res`:
-
-| `output_res` | `res_pct` | Effective Internal → Output | Use Case |
-| --- | --- | --- | --- |
-| `0` *(4K)* | `50` | `1920×1080` → `3840×2160` | **Default** — best balance on 4K TVs. |
-| `1440` | `100` | `2560×1440` → `2560×1440` | Native 1:1 1440p on 1440p monitors (no 4K double-scaling). |
-| `1440` | `75` | `1920×1080` → `2560×1440` | 1080p internal upscaled cleanly to 1440p (high FPS on 1440p displays). |
-| `1080` | `100` | `1920×1080` → `1920×1080` | Native 1:1 1080p (skips 4K upscaling/post-FX for maximum FPS on base PS5). |
-
-> **Tip:** Avoid leaving `res_pct=50` when using `output_res=1080` unless you intentionally want `960×540` internal resolution!
+> **Not sure what to pick?** See **[SETTINGS.md](SETTINGS.md)** for ready-to-use presets for **PS5 Fat/Slim** & **PS5 Pro** and how to combine `output_res` with `res_pct`.
 
 Logs are saved to `/data/gtavi-unlockfps/gtavi-unlockfps.log`.
 
