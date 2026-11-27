@@ -18,7 +18,19 @@ daemon=1
 * Renders internally at **`1920×1080`** and upscales to 4K via `TAA2U` (~44–50+ FPS, pairs well with PS5 VRR 48–60 Hz).
 * For a slightly sharper image at the cost of a few FPS, try `res_pct=55` (`2112×1188`).
 
-### 2. Maximum FPS / 1080p Monitor *(Experimental)*
+### 2. Locked 40 FPS on 120 Hz Displays *(Balanced Sharpness & Smoothness)*
+```ini
+fps=40
+res_pct=55
+refresh_hz=120
+output_res=0
+pro_rt_half=0
+daemon=1
+```
+* **Requires forcing 120 Hz output externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system)** (GTAVI does not switch HDMI to 120 Hz on its own; setting `refresh_hz=120` on a 60 Hz signal will cap FPS to 20).
+* Locks hardware V-Sync to an even **`40.00 FPS`** (`120 / 3`) at **`2112×1188` → `TAA2U` 4K** (`res_pct=50` if you want extra headroom in dense city scenes).
+
+### 3. Maximum FPS / 1080p Monitor *(Experimental)*
 ```ini
 fps=60
 res_pct=100
@@ -29,7 +41,7 @@ daemon=1
 ```
 * Native 1:1 **`1920×1080`** output—skips 4K `TAA2U` upscaling and 4K post-processing for extra GPU headroom on base PS5.
 
-### 3. 1440p Monitor (No 4K Double-Scaling) *(Experimental)*
+### 4. 1440p Monitor (No 4K Double-Scaling) *(Experimental)*
 ```ini
 fps=60
 res_pct=75
@@ -65,7 +77,7 @@ output_res=0
 pro_rt_half=0
 daemon=1
 ```
-* Use only when running in **120 Hz output mode**. Locks hardware V-Sync to an even **`40.00 FPS`** (`120 / 3`) at **`2304×1296` → PSSR 4K**.
+* **Requires forcing 120 Hz output externally via [ps-patch-system](https://github.com/illusionyy/ps-patch-system)** (GTAVI does not switch HDMI to 120 Hz on its own; setting `refresh_hz=120` on a 60 Hz signal will cap FPS to 20). Locks hardware V-Sync to an even **`40.00 FPS`** (`120 / 3`) at **`2304×1296` → PSSR 4K**.
 
 ### 3. Maximum FPS on PS5 Pro *(Experimental)*
 ```ini
