@@ -51,16 +51,16 @@ Edit over FTP without rebuilding (out-of-range values are logged and fall back t
 
 ### `res_pct` Reference Values (4K Output)
 
-> **Allocator limit:** GTAVI sizes its internal render target pool proportionally to `output_res` expecting stock ratios (**`<= 67%`** on base PS5, **`<= 60%`** on PS5 Pro). Values above those limits (e.g. `75`–`100`) overflow the pool and crash on boot (`OnOutOfMemory`).
+> **Allocator limit:** GTAVI sizes its internal render target pool proportionally to `output_res` expecting stock ratios (**`<= 67%`** on base PS5, **`<= 66%`** on PS5 Pro). Values above those limits (e.g. `75`–`100`) overflow the pool and crash on boot (`OnOutOfMemory`). On PS5 Pro the limit is the fixed transient render heap (`0x08930da7`); `pro_highres=1` enlarges it (see [SETTINGS.md](SETTINGS.md)).
 
 | `res_pct` | Internal Resolution (at 4K `output_res=0`) | Notes |
 | --- | --- | --- |
-| `67` | `2560×1440` | **Stock PS5 Fat/Slim** (`TAA2U`). **Do not use on PS5 Pro** with stock RT — exceeds Pro's transient RT pool (`0x08930da7` crash on boot); use `0` for stock PS5 Pro (`2240×1260`). |
+| `67` | `2574×1448` | **Stock PS5 Fat/Slim** (`TAA2U`). **On PS5 Pro** it exceeds the transient render heap (`0x08930da7` crash) unless `pro_highres=1`; use `0` for stock PS5 Pro (`2560×1440`). |
 | `60` | `2304×1296` | Sharper middle ground (safe upper limit tested on **PS5 Pro** PSSR). |
 | `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |
 | **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than base PS5 stock, keeps all other graphics settings 100% stock. |
-| `25`–`49` | `960×540` – `1881×1058` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more upscaling shimmering). |
-| `0` | Stock (`2560×1440` PS5 / `2240×1260` Pro) | Leaves internal resolution completely untouched. |
+| `25`–`49` | `960×540` – `1884×1060` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more upscaling shimmering). |
+| `0` | Stock (`2560×1440` PS5 / `2560×1440` Pro) | Leaves internal resolution completely untouched. |
 
 > **Not sure what to pick?** See **[SETTINGS.md](SETTINGS.md)** for ready-to-use presets for **PS5 Fat/Slim** & **PS5 Pro** and how to combine `output_res` with `res_pct`.
 

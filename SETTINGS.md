@@ -2,7 +2,7 @@
 
 Copy any preset below into `/data/gtavi-unlockfps/fps.txt` over FTP. If `daemon=1` is enabled, changes take effect automatically the next time you restart GTAVI (no need to reload the `.elf`).
 
-> **Important `res_pct` limit:** GTAVI sizes its internal render target memory pool proportionally to `output_res`, expecting stock scale ratios (**`<= 67%`** on base PS5 Fat/Slim, **`<= 60%`** on PS5 Pro). Setting `res_pct` above those limits (e.g. `75` or `100`) overflows the allocator pool and crashes on boot (`OnOutOfMemory`), even when `output_res` is `1440` or `1080`.
+> **Important `res_pct` limit:** GTAVI sizes its internal render target memory pool proportionally to `output_res`, expecting stock scale ratios (**`<= 67%`** on base PS5 Fat/Slim, **`<= 66%`** on PS5 Pro). Setting `res_pct` above those limits (e.g. `75` or `100`) overflows the allocator pool and crashes on boot (`OnOutOfMemory`), even when `output_res` is `1440` or `1080`. On PS5 Pro use `pro_highres=1` (preset 4) to go higher.
 
 ---
 
@@ -57,7 +57,7 @@ pro_rt_half=0
 daemon=1
 ```
 * Renders internally at **`2112×1188`** and upscales to 4K via native **PSSR**.
-* With stock Pro RT (`pro_rt_half=0`), keep `res_pct` at **`60` or lower** (or `0` for stock `2240×1260`); `67%+` exceeds PS5 Pro's transient RT pool (`0x08930da7` crash on boot).
+* Keep `res_pct` at **`66` or lower** (or `0` for stock `2560×1440`); `67%+` exceeds PS5 Pro's transient render heap (`0x08930da7` crash) unless `pro_highres=1` (preset 4).
 
 ### 2. Locked 40 FPS on 120 Hz Displays
 ```ini
@@ -81,11 +81,26 @@ daemon=1
 ```
 * **`1920×1080` → PSSR 4K** with RT Reflections lowered from full-res (Tier 3) to half-res (matching base PS5) for maximum FPS while keeping PSSR and intact ocean water.
 
+### 4. Above-Stock Resolution with Full RT *(Experimental)*
+```ini
+fps=40
+res_pct=80
+refresh_hz=120
+output_res=0
+pro_rt_half=0
+daemon=0
+pro_highres=1
+```
+* **`3072x1728` -> PSSR 4K** with full-res RT. `fps=40` needs forced 120 Hz (see preset 2); otherwise use `fps=30`, `refresh_hz=60`.
+* `pro_highres=1` enlarges the render heaps that cause the `67%+` crash (`0x08930da7`) and takes the memory from the main pool. Load the payload **before** starting GTAVI, or it falls back to `2532x1424`.
+* Sizes are rounded to even width/height; odd sizes (e.g. `2572x1447` at 67%) give green speckles in RT reflections.
+* Up to `res_pct=90` tested clean. 85%+ dips below 30 FPS; 100% boots but leaves almost no main pool headroom.
+
 ---
 
 ## Combining `output_res` with `res_pct`
 
-`res_pct` always scales relative to **`output_res`** and must stay within the game's allocator ratio (**`0` or `<= 67`** on base PS5, **`0` or `<= 60`** on PS5 Pro):
+`res_pct` always scales relative to **`output_res`** and must stay within the game's allocator ratio (**`0` or `<= 67`** on base PS5, **`0` or `<= 66`** on PS5 Pro):
 
 | `output_res` | `res_pct` | Effective Internal → Output | Notes |
 | --- | --- | --- | --- |
