@@ -74,7 +74,7 @@ All options below default to **`0` (stock)** and require loading the payload **b
 | **`low_volumetric`** | `0` / `1` | `0` | Lowers volumetric clouds and fog quality (raymarch + lighting) to low tier for extra GPU FPS. |
 | **`lod_scale`** | `0`, or `50`–`100` | `0` | Draw distance percentage (`0` = stock `100%`, e.g. `75` = `75%`). Reduces **both CPU and GPU** load in dense city areas. |
 | **`low_bvh`** | `0` / `1` | `0` | Lowers the ray-tracing BVH geometry tree quality to reduce **CPU and GPU** RT overhead. |
-| **`base_highres`** | `0` / `1` | `0` | *(Base PS5)* Dynamically expands base PS5 video memory at startup (`+168/+256 MB` for `res_pct <= 75`, `+296/+512 MB` for `res_pct > 75`) so you can run higher `res_pct` ratios (e.g. `output_res=1440` + `res_pct=75–100`) without crashing. |
+| **`base_highres`** | `0` / `1` | `0` | *(Base PS5)* Expands base PS5 video memory at startup so you can run higher `res_pct` ratios (e.g. `output_res=1440` + `res_pct=75–80`; `75` is the practical sweet spot, `80` dips below 30 FPS, `90–100` crashes). |
 
 ---
 

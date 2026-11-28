@@ -119,6 +119,7 @@ pro_highres=1
 | `0` *(4K)* | `55` / `60` | `2112×1188` / `2304×1296` → `3840×2160` | Sharper 4K output (works on PS5 & PS5 Pro). |
 | `1440` | `0` *(stock)* | `1706×960` (PS5) / `1493×840` (Pro) → `2560×1440` | Native 1440p output without 4K upscaling/post-FX. |
 | `1440` | `60` | `1536×864` → `2560×1440` | Confirmed working on PS5 Pro (`67%+` crashes with default memory). |
+| `1440` | `75` *(with `base_highres=1`)* | `1920×1080` → `2560×1440` | Confirmed working on base PS5 (`80` also boots but dips below 30 FPS). |
 | `1080` | `0` *(stock)* | `1280×720` → `1920×1080` | Native 1080p output (lightest GPU load). |
 
 ---
@@ -134,4 +135,4 @@ All tweaks below can be combined with any preset above (load the payload **befor
 * **`low_volumetric=1`** *(PS5 & PS5 Pro)* — lowers volumetric clouds & fog quality (raymarch + lighting) for extra GPU FPS.
 * **`lod_scale=75`** *(PS5 & PS5 Pro, `50`–`100`%)* — lowers draw distance to reduce **both CPU and GPU** load in dense city areas.
 * **`low_bvh=1`** *(PS5 & PS5 Pro)* — lowers the ray-tracing BVH geometry tree quality to reduce **CPU and GPU** RT overhead.
-* **`base_highres=1`** *(Base PS5)* — dynamically expands base PS5 video memory at startup so you can run higher `res_pct` ratios (e.g. `output_res=1440` + `res_pct=75–100`) without crashing.
+* **`base_highres=1`** *(Base PS5)* — expands base PS5 video memory at startup so you can run higher `res_pct` ratios (e.g. `output_res=1440` + `res_pct=75–80`; `75` is recommended, `80` dips below 30 FPS, `90–100` crashes).
