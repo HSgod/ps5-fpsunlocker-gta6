@@ -45,7 +45,7 @@ daemon=0
 | --- | --- | --- |
 | `70`–`100` | `2688×1512` – `3840×2160` | Requires **`pro_highres=1`** on PS5 Pro (4K output). Tested clean up to `90%` and native 4K. |
 | `67` | `2560×1440` | **Stock PS5 Fat/Slim** (`TAA2U`). Crashes on **PS5 Pro** unless `pro_highres=1` is enabled (use `0` for stock PS5 Pro `2560×1440`). |
-| `60` | `2304×1296` | Sharper middle ground (safe upper limit on **PS5 Pro** without `pro_highres`). |
+| `60` | `2304×1296` | Sharper middle ground (`66%` is the upper limit on **PS5 Pro** without `pro_highres`). |
 | `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |
 | **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than base PS5 stock, keeps all other graphics settings 100% stock. |
 | `25`–`49` | `960×540` – `1884×1060` | **Experimental** (e.g. `33` ≈ `720p`; softer image / more upscaling shimmering). |
