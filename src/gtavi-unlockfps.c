@@ -1,22 +1,23 @@
-/* gtavi-unlockfps.c -- one-shot runtime FPS unlock & TAA2U render scale payload
- * for Grand Theft Auto VI (PPSA38500) on a jailbroken PS5.
+/* gtavi-unlockfps.c -- runtime FPS unlocker, resolution scaler & performance
+ * patcher for Grand Theft Auto VI (PPSA01547 / PPSA29660 / PPSA38500) on a
+ * jailbroken PS5 / PS5 Pro.
  *
- * What this payload does (and nothing else):
+ * What this payload does:
  *   - loads settings from /data/gtavi-unlockfps/fps.txt (defaults: fps=60,
- *     res_pct=50 [1080p internal on 4K via TAA2U]; stock PS5 is 67% / 1440p),
- *   - waits up to 10 minutes for PPSA38500 (eboot.bin) to start without
- *     touching memory of any other app or system process,
+ *     res_pct=50 [1920x1080 internal on 4K], close_fix=1),
+ *   - watches eboot.bin processes strictly for supported GTAVI Title IDs
+ *     without touching memory of any other app or system process,
  *   - resolves eboot.bin's ASLR base address and verifies 64 bytes of context
- *     around each target site before writing anything,
- *   - unlocks the 30 FPS cap (0x3f73e51, 0x40d2be1) and updates live
- *     g_TargetFrameTimeUs / g_RequestedFrameLock globals in RAM,
- *   - fixes game speed-up above 30 FPS by lowering fwTimer's minimum delta-time
- *     floor from 1/30s to 1ms (0x3f73ecd, 0xabab49c, 0xabab4a0),
- *   - when res_pct > 0 (25..100), patches TAA2U::Update() (0x62eadc0, 18 bytes)
- *     to set the internal render scale float before TAA2U upscaling (all other
- *     graphics quality settings remain 100% stock),
- *   - uses DMAP page-table writes on FW >= 8.40 (or mdbg_copyin on older FW),
- *     verifies readback, shows PS5 notifications, writes a log, and exits.
+ *     around every patch site before writing anything,
+ *   - unlocks the 30 FPS cap (0x3f73e51, 0x40d2be1), lowers fwTimer's floor
+ *     to 1/3000s (1.0x speed), and scales TAA2U (PS5) & PSSR (PS5 Pro) with
+ *     multiple-of-4 resolution rounding,
+ *   - fixes the CE-108255-1 close-game error (SPACECHECK00.dat bypass),
+ *   - supports optional boot-time tweaks via SIGSTOP/SIGCONT freeze (120 Hz
+ *     flip-rate dividers, output_res, pro_highres, base_highres, pro_rt_half,
+ *     pro_taa2u, low_shadows 1-3, low_reflections, low_volumetric, lod_scale,
+ *     low_bvh, motion_blur) and background daemon mode,
+ *   - uses DMAP page-table writes on FW >= 8.40 (or mdbg_copyin on older FW).
  */
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -43,7 +44,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.17"
+#define TOOL_VERSION "1.18"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -184,11 +185,15 @@ static const uint32_t POOL_RVAS[10] = {
 #define PRO_TAA2U_RVA       0x2afc2c9u /* call qword ptr [rax + 0x10]       (3 bytes)  */
 #define PRO_TAA2U_LEN       3u
 
-/* DirectionalShadowQuality (0xc64 -> 1280) & ShadowSoftShadows (0xd70 -> filter 2): */
+/* DirectionalShadowQuality (0xc64 -> 1280), ShadowSoftShadows (0xd70 -> filter 2),
+ * and RT Shadows (RtDynamicShadows 0xd55 & RtLODLightShadows 0xd54 -> 0 for level 3): */
 #define LOW_SHADOWS_RVA     0x3f74417u /* mov eax, dword ptr [rbx + 0xc64]  (6 bytes)  */
 #define LOW_SHADOWS_LEN     6u
 #define LOW_SHADOWS2_RVA    0x3f74350u /* mov eax, dword ptr [rax + 0x568]  (6 bytes)  */
 #define LOW_SHADOWS2_LEN    6u
+#define RT_DYN_SHADOWS_RVA  0x41bc678u /* mov cl, byte ptr [rax + 0x54d]    (6 bytes)  */
+#define RT_LOD_SHADOWS_RVA  0x2f2e07du /* mov cl, byte ptr [rbx + 0x13c]    (6 bytes)  */
+#define RT_SHADOWS_LEN      6u
 
 /* ReflectionQuality (0xc88) map size check in ApplySettings (256 -> 128): */
 #define LOW_REFLECTIONS_RVA 0x3f73f11u /* cmp dword ptr [rbx + 0xc88], 0    (7 bytes)  */
@@ -422,6 +427,20 @@ static const uint8_t LOW_SHADOWS2_CTX[64] = {
     0x95,0xc1,0x83,0xc1,0x0b,0x83,0xf8,0x01,0xb8,0x07,0x00,0x00,0x00,0x0f,0x45,0xc1
 };
 
+/* 64-byte contexts for RtDynamicShadows (0x41bc678) & RtLODLightShadows (0x2f2e07d): */
+static const uint8_t RT_DYN_SHADOWS_CTX[64] = {
+    0xc5,0x75,0x06,0x48,0x8d,0x15,0x4e,0xf0,0xb6,0xfd,0x48,0x8b,0x40,0x08,0x48,0x8b,
+    0x08,0x48,0x8b,0x49,0x50,0x48,0x39,0xd1,0x75,0x6b,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8a,0x88,0x4d,0x05,0x00,0x00,0x88,0x0d,0x7c,0xb1,0xcb,0x07,0x31,0xc9,0x83,0xb8,
+    0x48,0x05,0x00,0x00,0x00,0x88,0x0d,0x86,0xaa,0xfa,0x07,0x88,0x0d,0x81,0xaa,0xfa
+};
+static const uint8_t RT_LOD_SHADOWS_CTX[64] = {
+    0x41,0x89,0xc7,0x41,0xd1,0xfd,0x41,0xd1,0xff,0x83,0xbb,0x34,0x01,0x00,0x00,0x00,
+    0x45,0x89,0xea,0x44,0x89,0xbd,0x2c,0xff,0xff,0xff,0x41,0x0f,0x95,0x44,0x24,0x0d,
+    0x8a,0x8b,0x3c,0x01,0x00,0x00,0x41,0x88,0x4c,0x24,0x0c,0x0f,0x84,0x0a,0x01,0x00,
+    0x00,0x8b,0xb3,0x40,0x01,0x00,0x00,0x44,0x8b,0x83,0xf8,0x01,0x00,0x00,0x44,0x8b
+};
+
 /* 64-byte context for LodScale (0xce8 -> 0xd796908) 16-byte load+store: */
 static const uint8_t LOD_SCALE_CTX[64] = {
     0x8d,0x71,0x07,0x89,0x0d,0xa0,0xe3,0xf5,0x07,0x89,0x15,0x82,0xe3,0xf5,0x07,0x89,
@@ -651,7 +670,7 @@ static void load_settings(void) {
                        "pro_taa2u=%u\n"
                        "#\n"
                        "# --- Performance & Graphics Tweaks (Experimental, 0=stock) ---\n"
-                       "# low_shadows: 0=stock, 1=1280 shadow map, 2=1280 shadow map + fast soft shadows\n"
+                       "# low_shadows: 0=stock, 1=1280 shadow map, 2=+fast soft shadows, 3=+disable RT shadows\n"
                        "low_shadows=%u\n"
                        "# low_reflections: 1=lower reflection map resolution (256 -> 128)\n"
                        "low_reflections=%u\n"
@@ -751,10 +770,10 @@ static void load_settings(void) {
             }
         } else if (!strncmp(line, "low_shadows", 11)) {
             saw_low_shadows = 1;
-            if (v >= 0 && v <= 2) {
+            if (v >= 0 && v <= 3) {
                 g_low_shadows = (uint32_t)v;
             } else {
-                logmsg("WARN", "ignoring low_shadows=%d (must be 0, 1, or 2)", v);
+                logmsg("WARN", "ignoring low_shadows=%d (must be 0..3)", v);
             }
         } else if (!strncmp(line, "low_reflections", 15)) {
             saw_low_reflections = 1;
@@ -856,7 +875,7 @@ static void load_settings(void) {
                 logmsg("INFO", "appended default pro_taa2u=%u to %s", DEFAULT_PRO_TAA2U, CONF_PATH);
             }
             if (!saw_low_shadows) {
-                fprintf(f, "# low_shadows: 0=stock, 1=1280 shadow map, 2=1280 shadow map + fast soft shadows\n"
+                fprintf(f, "# low_shadows: 0=stock, 1=1280 shadow map, 2=+fast soft shadows, 3=+disable RT shadows\n"
                            "low_shadows=%u\n", DEFAULT_LOW_SHADOWS);
                 logmsg("INFO", "appended default low_shadows=%u to %s", DEFAULT_LOW_SHADOWS, CONF_PATH);
             }
@@ -1172,6 +1191,7 @@ struct patch_bundle {
     struct patch_site pro_taa2u;
     struct patch_site low_shadows;
     struct patch_site low_shadows2;
+    struct patch_site rt_shadows[2];
     struct patch_site low_reflections;
     struct patch_site low_vol[2];
     struct patch_site lod_scale;
@@ -1229,6 +1249,16 @@ static int apply_site_group(uint32_t pid, uint64_t base,
     return 1;
 }
 
+static void apply_optional_site(uint32_t pid, uint64_t base,
+                                const struct patch_site *s, int *already) {
+    if (verify_site(pid, base, s) == 1) {
+        if (apply_site(pid, base, s, already))
+            logmsg("WARN", "%s write failed", s->name);
+    } else {
+        logmsg("WARN", "%s context mismatch", s->name);
+    }
+}
+
 static void format_opt_flags(char *buf, size_t sz) {
     size_t len = 0;
     buf[0] = '\0';
@@ -1264,9 +1294,9 @@ static uint32_t heap_pages_for(uint32_t w, uint32_t h) {
     return pages;
 }
 
-/* Pick the render scale: closest to res_pct with EVEN width and height (odd sizes break
- * half-res reflection buffers -> green speckles). With pro_highres, also size the heap and
- * step the resolution down until it fits in HEAP_PAGES_MAX. */
+/* Pick the render scale: closest to res_pct with width and height divisible by 4 (so both
+ * full-res and half-res buffers are always even, avoiding RGB speckles on RT reflection edges).
+ * With pro_highres, also size the heap and step down until it fits in HEAP_PAGES_MAX. */
 static void compute_resolution(void) {
     uint32_t ow = 3840u, oh = 2160u;
     int h0, d, k, step_down = 0;
@@ -1279,12 +1309,12 @@ static void compute_resolution(void) {
     if (g_output_res == 1440) { ow = 2560u; oh = 1440u; }
     if (g_output_res == 1080) { ow = 1920u; oh = 1080u; }
 
-    h0 = (int)(oh * g_res_pct / 100u) & ~1;
+    h0 = (int)(oh * g_res_pct / 100u) & ~3;
     for (;;) {
-        /* search 0,+2,-2,+4,-4.. around the target; only downward once stepping down */
+        /* search 0,+4,-4,+8,-8.. around the target; only downward once stepping down */
         for (k = 0; k <= 40; k++) {
             int h;
-            d = step_down ? -2 * k : ((k & 1) ? k + 1 : -k);
+            d = step_down ? -4 * k : (k ? (((k + 1) / 2) * 4 * ((k & 1) ? 1 : -1)) : 0);
             h = h0 + d;
             volatile float s, fw, fh;
             uint32_t w2, h2;
@@ -1295,7 +1325,7 @@ static void compute_resolution(void) {
             fh = (float)oh * s;
             w2 = (uint32_t)fw;
             h2 = (uint32_t)fh;
-            if ((w2 & 1u) || h2 != (uint32_t)h)
+            if ((w2 & 3u) || h2 != (uint32_t)h)
                 continue;
             g_scale = s;
             g_res_w = w2;
@@ -1303,7 +1333,7 @@ static void compute_resolution(void) {
             break;
         }
         if (!g_scale) {
-            logmsg("WARN", "no even resolution near res_pct=%u; using plain scale", g_res_pct);
+            logmsg("WARN", "no mod-4 resolution near res_pct=%u; using plain scale", g_res_pct);
             g_scale = (float)g_res_pct / 100.0f;
             g_res_w = (uint32_t)((float)ow * g_scale);
             g_res_h = (uint32_t)((float)oh * g_scale);
@@ -1320,7 +1350,7 @@ static void compute_resolution(void) {
             return;
         logmsg("INFO", "%ux%u needs %u heap pages (max 0x%x); stepping down",
                g_res_w, g_res_h, g_heap_pages, HEAP_PAGES_MAX);
-        h0 = (int)g_res_h - 2;
+        h0 = (int)g_res_h - 4;
         step_down = 1;
         g_scale = 0.0f;
     }
@@ -1507,7 +1537,7 @@ static void build_patches(struct patch_bundle *b) {
     put32le(b->low_shadows.patch + 1, 1u);
     b->low_shadows.patch[5] = 0x90;
 
-    /* Fast Soft Shadows for low_shadows=2 (0x3f74350, 6B: mov eax, [rax+0x568] -> xor eax, eax; nop*4 -> filter 2): */
+    /* Fast Soft Shadows for low_shadows>=2 (0x3f74350, 6B: mov eax, [rax+0x568] -> xor eax, eax; nop*4 -> filter 2): */
     b->low_shadows2.name = "low_shadows2";
     b->low_shadows2.rva = LOW_SHADOWS2_RVA;
     b->low_shadows2.len = LOW_SHADOWS2_LEN;
@@ -1515,6 +1545,24 @@ static void build_patches(struct patch_bundle *b) {
     b->low_shadows2.patch[0] = 0x31;
     b->low_shadows2.patch[1] = 0xc0;
     memset(b->low_shadows2.patch + 2, 0x90, 4);
+
+    /* Disable RT Shadows for low_shadows>=3 (RtDynamicShadows 0x41bc678 & RtLODLightShadows 0x2f2e07d):
+     * Uses mov cl, 0; nop*4 (b1 00 90*4) so CPU flags (used by je at 0x2f2e088) stay untouched. */
+    b->rt_shadows[0].name = "rt_dyn_shadows";
+    b->rt_shadows[0].rva = RT_DYN_SHADOWS_RVA;
+    b->rt_shadows[0].len = RT_SHADOWS_LEN;
+    b->rt_shadows[0].ctx = RT_DYN_SHADOWS_CTX;
+    b->rt_shadows[0].patch[0] = 0xb1;
+    b->rt_shadows[0].patch[1] = 0x00;
+    memset(b->rt_shadows[0].patch + 2, 0x90, 4);
+
+    b->rt_shadows[1].name = "rt_lod_shadows";
+    b->rt_shadows[1].rva = RT_LOD_SHADOWS_RVA;
+    b->rt_shadows[1].len = RT_SHADOWS_LEN;
+    b->rt_shadows[1].ctx = RT_LOD_SHADOWS_CTX;
+    b->rt_shadows[1].patch[0] = 0xb1;
+    b->rt_shadows[1].patch[1] = 0x00;
+    memset(b->rt_shadows[1].patch + 2, 0x90, 4);
 
     /* ReflectionQuality map 256 -> 128 (0x3f73f11, 7B: cmp [rbx+0xc88], 0 -> cmp eax, eax; nop*5): */
     b->low_reflections.name = "low_reflections";
@@ -1586,6 +1634,36 @@ static void build_patches(struct patch_bundle *b) {
     memset(b->motion_blur[1].patch + 2, 0x90, 4);
 }
 
+static int verify_main_pool(uint32_t pid, uint64_t base, const char *tag) {
+    uint8_t q[8];
+    unsigned i;
+    for (i = 0; i < 10; i++) {
+        uint64_t v;
+        if (proc_read(pid, base + POOL_RVAS[i], q, 8))
+            return 0;
+        memcpy(&v, q, 8);
+        if (v != POOL_STOCK) {
+            logmsg("WARN", "%s: main pool site %u does not match the supported build", tag, i);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int write_main_pool(uint32_t pid, uint64_t base, uint64_t pool_new, const char *tag) {
+    uint8_t q[8], cur[8];
+    unsigned i;
+    memcpy(q, &pool_new, 8);
+    for (i = 0; i < 10; i++) {
+        if (proc_write(pid, base + POOL_RVAS[i], q, 8) ||
+            proc_read(pid, base + POOL_RVAS[i], cur, 8) || memcmp(cur, q, 8)) {
+            logmsg("WARN", "%s: main pool write %u failed", tag, i);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Raise the transient render heap and shrink the main pool by the same amount.
  * Must run before GTAVI creates the heap (process frozen right after it appears).
  * Returns 1 if the heap is (now) large enough for g_res_w x g_res_h, 0 otherwise. */
@@ -1610,16 +1688,8 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
         logmsg("WARN", "heap size site does not match the supported build");
         return 0;
     }
-    for (i = 0; i < 10; i++) {
-        uint64_t v;
-        if (proc_read(pid, base + POOL_RVAS[i], q, 8))
-            return 0;
-        memcpy(&v, q, 8);
-        if (v != POOL_STOCK) {
-            logmsg("WARN", "main pool site %u does not match the supported build", i);
-            return 0;
-        }
-    }
+    if (!verify_main_pool(pid, base, "pro_highres"))
+        return 0;
     relocate = g_heap_pages > HEAP_PAGES_ARRAY;
     if (relocate) {
         static const uint8_t lea1[7] = { 0x4c,0x8d,0x3d,0xcb,0x23,0x5c,0x0a };
@@ -1630,12 +1700,12 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
         if (proc_read(pid, base + LEA1_RVA, cur, 7) || memcmp(cur, lea1, 7) ||
             proc_read(pid, base + LEA2_RVA, cur, 7) || memcmp(cur, lea2, 7) ||
             proc_read(pid, base + HEAP2_RVA, q, 8)) {
-            logmsg("WARN", "page array / heap #2 sites do not match the supported build");
+            logmsg("WARN", "page array / heap 2 sites do not match the supported build");
             return 0;
         }
         memcpy(&h2, q, 8);
         if (h2 != HEAP2_STOCK) {
-            logmsg("WARN", "heap #2 size is not stock");
+            logmsg("WARN", "heap 2 size is not stock");
             return 0;
         }
         zero = malloc((size_t)g_heap_pages * 8u);
@@ -1654,14 +1724,8 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
     extra = (uint64_t)(g_heap_pages - HEAP_PAGES_STOCK) * 0x10000u + (relocate ? HEAP2_ADD : 0u);
     pool_new = POOL_STOCK - ((extra + 0x1fffffu) & ~(uint64_t)0x1fffffu);
     /* Order keeps every partial failure safe: shrink pool first, grow heaps last. */
-    for (i = 0; i < 10; i++) {
-        memcpy(q, &pool_new, 8);
-        if (proc_write(pid, base + POOL_RVAS[i], q, 8) ||
-            proc_read(pid, base + POOL_RVAS[i], cur, 8) || memcmp(cur, q, 8)) {
-            logmsg("WARN", "main pool write %u failed", i);
-            return 0; /* heap left stock: the game still boots at stock size */
-        }
-    }
+    if (!write_main_pool(pid, base, pool_new, "pro_highres"))
+        return 0; /* heap left stock: the game still boots at stock size */
     if (relocate) {
         static const uint32_t lea_rva[2] = { LEA1_RVA, LEA2_RVA };
         uint64_t h2 = HEAP2_STOCK + HEAP2_ADD;
@@ -1676,10 +1740,10 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
         memcpy(q, &h2, 8);
         if (proc_write(pid, base + HEAP2_RVA, q, 8) ||
             proc_read(pid, base + HEAP2_RVA, cur, 8) || memcmp(cur, q, 8)) {
-            logmsg("WARN", "heap #2 write failed");
+            logmsg("WARN", "heap 2 write failed");
             return 0;
         }
-        logmsg("OK", "page array moved, heap #2 %llu -> %llu MB",
+        logmsg("OK", "page array moved, heap 2 %llu -> %llu MB",
                (unsigned long long)(HEAP2_STOCK >> 20), (unsigned long long)(h2 >> 20));
     }
     put32le(imm, g_heap_pages);
@@ -1695,8 +1759,8 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
 }
 
 /* Experimental Base PS5 dynamic heap expansion (base_highres=1):
- *   res_pct <= 75: transient 728 -> 896 MB (+168 MB), heap #2 2718 -> 2974 MB (+256 MB)
- *   res_pct >  75: transient 728 -> 1024 MB (+296 MB), heap #2 2718 -> 3230 MB (+512 MB)
+ *   res_pct <= 75: transient 728 -> 896 MB (+168 MB), heap 2 2718 -> 2974 MB (+256 MB)
+ *   res_pct >  75: transient 728 -> 1024 MB (+296 MB), heap 2 2718 -> 3230 MB (+512 MB)
  * Both fit the stock 0x4000 page pointer array without relocation, shrinking the shared
  * main pool by the exact same total. */
 static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
@@ -1705,7 +1769,6 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
     uint64_t heap_now = 0, h2 = 0, extra, pool_new;
     uint32_t target_pages = (g_res_pct > 75u) ? BASE_HEAP_PAGES_HI : BASE_HEAP_PAGES_MED;
     uint64_t heap2_add = (g_res_pct > 75u) ? BASE_HEAP2_ADD_HI : BASE_HEAP2_ADD_MED;
-    unsigned i;
 
     if (!g_base_highres)
         return 1;
@@ -1725,36 +1788,22 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
         return 0;
     memcpy(&h2, q, 8);
     if (h2 != BASE_HEAP2_STOCK) {
-        logmsg("WARN", "base_highres: base heap #2 size is not stock");
+        logmsg("WARN", "base_highres: base heap 2 size is not stock");
         return 0;
     }
-    for (i = 0; i < 10; i++) {
-        uint64_t v;
-        if (proc_read(pid, base + POOL_RVAS[i], q, 8))
-            return 0;
-        memcpy(&v, q, 8);
-        if (v != POOL_STOCK) {
-            logmsg("WARN", "base_highres: main pool site %u does not match the supported build", i);
-            return 0;
-        }
-    }
+    if (!verify_main_pool(pid, base, "base_highres"))
+        return 0;
 
     extra = (uint64_t)(target_pages - BASE_HEAP_PAGES_STOCK) * 0x10000u + heap2_add;
     pool_new = POOL_STOCK - ((extra + 0x1fffffu) & ~(uint64_t)0x1fffffu);
     /* Shrink pool first, grow heaps last so any partial failure stays safe. */
-    for (i = 0; i < 10; i++) {
-        memcpy(q, &pool_new, 8);
-        if (proc_write(pid, base + POOL_RVAS[i], q, 8) ||
-            proc_read(pid, base + POOL_RVAS[i], cur, 8) || memcmp(cur, q, 8)) {
-            logmsg("WARN", "base_highres: main pool write %u failed", i);
-            return 0;
-        }
-    }
+    if (!write_main_pool(pid, base, pool_new, "base_highres"))
+        return 0;
     h2 = BASE_HEAP2_STOCK + heap2_add;
     memcpy(q, &h2, 8);
     if (proc_write(pid, base + BASE_HEAP2_RVA, q, 8) ||
         proc_read(pid, base + BASE_HEAP2_RVA, cur, 8) || memcmp(cur, q, 8)) {
-        logmsg("WARN", "base_highres: base heap #2 write failed");
+        logmsg("WARN", "base_highres: base heap 2 write failed");
         return 0;
     }
     put32le(imm, target_pages);
@@ -1763,7 +1812,7 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
         logmsg("WARN", "base_highres: base transient heap write failed");
         return 0;
     }
-    logmsg("OK", "base_highres: transient %u -> %u MB, heap #2 %llu -> %llu MB, main pool %llu -> %llu MB",
+    logmsg("OK", "base_highres: transient %u -> %u MB, heap 2 %llu -> %llu MB, main pool %llu -> %llu MB",
            BASE_HEAP_PAGES_STOCK / 16u, target_pages / 16u,
            (unsigned long long)(BASE_HEAP2_STOCK >> 20), (unsigned long long)(h2 >> 20),
            (unsigned long long)(POOL_STOCK >> 20), (unsigned long long)(pool_new >> 20));
@@ -1776,7 +1825,7 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     int already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
     int hz_alr = 0, out_alr = 0, rt_half_alr = 0;
-    int close_alr = 0, pro_taa2u_alr = 0, low_shad_alr = 0, low_shad2_alr = 0;
+    int close_alr = 0, pro_taa2u_alr = 0, low_shad_alr = 0, low_shad2_alr = 0, rt_shad_alr = 0;
     int low_refl_alr = 0, low_vol_alr = 0, lod_alr = 0, low_bvh_alr = 0, mb_alr = 0;
     unsigned long found_ms = elapsed_ms();
     char flags[160];
@@ -1799,7 +1848,7 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
            (unsigned long long)base);
 
     if (g_heap_pages && !apply_highres_heap(pid, base)) {
-        /* Heap could not be enlarged: fall back to the largest even size below stock. */
+        /* Heap could not be enlarged: fall back to the largest mod-4 size below stock. */
         g_res_pct = 66u;
         g_pro_highres = 0u;
         build_patches(b);
@@ -1818,18 +1867,11 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
 
     /* Patch output resolution, upscaler, TAA2U/PSSR scale, and quality tweaks first
      * so they beat swapchain and render target allocation. */
-    if (g_output_res == 1440 || g_output_res == 1080) {
+    if (g_output_res == 1440 || g_output_res == 1080)
         apply_site_group(pid, base, b->out, 3, "output_res", &out_alr);
-    }
 
-    if (g_pro_taa2u) {
-        if (verify_site(pid, base, &b->pro_taa2u) == 1) {
-            if (apply_site(pid, base, &b->pro_taa2u, &pro_taa2u_alr))
-                logmsg("WARN", "pro_taa2u write failed");
-        } else {
-            logmsg("WARN", "pro_taa2u context mismatch");
-        }
-    }
+    if (g_pro_taa2u)
+        apply_optional_site(pid, base, &b->pro_taa2u, &pro_taa2u_alr);
 
     if (g_res_pct > 0) {
         int pssr_alr = 0;
@@ -1841,70 +1883,29 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         } else {
             logmsg("WARN", "TAA2U context mismatch; continuing with FPS unlock");
         }
-        if (verify_site(pid, base, &b->pssr) == 1) {
-            if (apply_site(pid, base, &b->pssr, &pssr_alr))
-                logmsg("WARN", "PSSR scale write failed; continuing");
-        } else {
-            logmsg("WARN", "PSSR context mismatch");
-        }
+        apply_optional_site(pid, base, &b->pssr, &pssr_alr);
     }
 
-    if (g_pro_rt_half) {
+    if (g_pro_rt_half)
         apply_site_group(pid, base, b->pro_rt_half, 4, "pro_rt_half", &rt_half_alr);
-    }
 
-    if (g_low_shadows >= 1) {
-        if (verify_site(pid, base, &b->low_shadows) == 1) {
-            if (apply_site(pid, base, &b->low_shadows, &low_shad_alr))
-                logmsg("WARN", "low_shadows write failed");
-        } else {
-            logmsg("WARN", "low_shadows context mismatch");
-        }
-    }
+    if (g_low_shadows >= 1)
+        apply_optional_site(pid, base, &b->low_shadows, &low_shad_alr);
+    if (g_low_shadows >= 2)
+        apply_optional_site(pid, base, &b->low_shadows2, &low_shad2_alr);
+    if (g_low_shadows >= 3)
+        apply_site_group(pid, base, b->rt_shadows, 2, "rt_shadows", &rt_shad_alr);
 
-    if (g_low_shadows >= 2) {
-        if (verify_site(pid, base, &b->low_shadows2) == 1) {
-            if (apply_site(pid, base, &b->low_shadows2, &low_shad2_alr))
-                logmsg("WARN", "low_shadows2 write failed");
-        } else {
-            logmsg("WARN", "low_shadows2 context mismatch");
-        }
-    }
-
-    if (g_low_reflections) {
-        if (verify_site(pid, base, &b->low_reflections) == 1) {
-            if (apply_site(pid, base, &b->low_reflections, &low_refl_alr))
-                logmsg("WARN", "low_reflections write failed");
-        } else {
-            logmsg("WARN", "low_reflections context mismatch");
-        }
-    }
-
-    if (g_low_volumetric) {
+    if (g_low_reflections)
+        apply_optional_site(pid, base, &b->low_reflections, &low_refl_alr);
+    if (g_low_volumetric)
         apply_site_group(pid, base, b->low_vol, 2, "low_volumetric", &low_vol_alr);
-    }
-
-    if (g_lod_scale > 0) {
-        if (verify_site(pid, base, &b->lod_scale) == 1) {
-            if (apply_site(pid, base, &b->lod_scale, &lod_alr))
-                logmsg("WARN", "lod_scale write failed");
-        } else {
-            logmsg("WARN", "lod_scale context mismatch");
-        }
-    }
-
-    if (g_low_bvh) {
-        if (verify_site(pid, base, &b->low_bvh) == 1) {
-            if (apply_site(pid, base, &b->low_bvh, &low_bvh_alr))
-                logmsg("WARN", "low_bvh write failed");
-        } else {
-            logmsg("WARN", "low_bvh context mismatch");
-        }
-    }
-
-    if (!g_motion_blur) {
+    if (g_lod_scale > 0)
+        apply_optional_site(pid, base, &b->lod_scale, &lod_alr);
+    if (g_low_bvh)
+        apply_optional_site(pid, base, &b->low_bvh, &low_bvh_alr);
+    if (!g_motion_blur)
         apply_site_group(pid, base, b->motion_blur, 2, "motion_blur", &mb_alr);
-    }
 
     if (apply_site(pid, base, &b->fps[0], &already1) ||
         apply_site(pid, base, &b->fps[1], &already2)) {
@@ -1912,32 +1913,13 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         return EXIT_WRITE_FAIL;
     }
 
-    if (verify_site(pid, base, &b->timestep) == 1) {
-        if (apply_site(pid, base, &b->timestep, &already_ts))
-            logmsg("WARN", "fwTimer floor code patch failed; relying on RAM write");
-    } else {
-        logmsg("WARN", "fwTimer floor context mismatch");
-    }
+    apply_optional_site(pid, base, &b->timestep, &already_ts);
+    apply_optional_site(pid, base, &b->timestep2, &already_ts2);
 
-    if (verify_site(pid, base, &b->timestep2) == 1) {
-        if (apply_site(pid, base, &b->timestep2, &already_ts2))
-            logmsg("WARN", "fwTimer floor2 patch failed");
-    } else {
-        logmsg("WARN", "fwTimer floor2 context mismatch");
-    }
-
-    if (g_refresh_hz == 120) {
+    if (g_refresh_hz == 120)
         apply_site_group(pid, base, b->hz, 6, "refresh_hz_120", &hz_alr);
-    }
-
-    if (g_close_fix) {
-        if (verify_site(pid, base, &b->close_fix) == 1) {
-            if (apply_site(pid, base, &b->close_fix, &close_alr))
-                logmsg("WARN", "close_fix write failed");
-        } else {
-            logmsg("WARN", "close_fix context mismatch");
-        }
-    }
+    if (g_close_fix)
+        apply_optional_site(pid, base, &b->close_fix, &close_alr);
 
     update_live_globals(pid, base);
     logmsg("OK", "all patches applied in %lu ms", elapsed_ms() - found_ms);
@@ -1947,9 +1929,10 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         (g_refresh_hz != 120 || hz_alr) && (!g_output_res || out_alr) &&
         (!g_pro_rt_half || rt_half_alr) && (!g_close_fix || close_alr) &&
         (!g_pro_taa2u || pro_taa2u_alr) && (!g_low_shadows || low_shad_alr) &&
-        (g_low_shadows < 2 || low_shad2_alr) && (!g_low_reflections || low_refl_alr) &&
-        (!g_low_volumetric || low_vol_alr) && (!g_lod_scale || lod_alr) &&
-        (!g_low_bvh || low_bvh_alr) && (g_motion_blur || mb_alr)) {
+        (g_low_shadows < 2 || low_shad2_alr) && (g_low_shadows < 3 || rt_shad_alr) &&
+        (!g_low_reflections || low_refl_alr) && (!g_low_volumetric || low_vol_alr) &&
+        (!g_lod_scale || lod_alr) && (!g_low_bvh || low_bvh_alr) &&
+        (g_motion_blur || mb_alr)) {
         notify("already active (Res %u%%%s).", g_res_pct, flags);
     } else if (taa2u_applied) {
         notify("FPS Unlocked, Res %u%%%s", g_res_pct, flags);

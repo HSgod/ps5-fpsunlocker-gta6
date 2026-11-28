@@ -109,6 +109,29 @@ pro_highres=1
 
 ---
 
+## 120 Hz, 40 FPS & VRR Note
+
+* **Locked 40 FPS (`fps=40`, `refresh_hz=120`) does not require VRR:** On a forced 120 Hz signal, GTAVI uses a hardware `120 / 3` divider (`25.0 ms` per frame — identical to official PS5 40 FPS Fidelity modes). As long as your chosen `res_pct` stays at or above 40 FPS, frame pacing is completely smooth even without VRR.
+* **PS5 VRR range is `48–120 Hz`** *(GTAVI does not have native LFC below 48 FPS)*: If you want VRR to smooth out fluctuations continuously, use **`fps=60`** with settings that keep gameplay above **48 FPS** (e.g. `res_pct=50` + optional `low_shadows`, `low_volumetric`, `lod_scale`, or `pro_rt_half=1` on PS5 Pro).
+
+---
+
+## Approximate FPS Benchmarks
+
+FPS varies heavily by location (indoors / beach vs dense city driving). Typical ranges reported by the community:
+
+| Console | Settings Summary | Typical FPS | Notes |
+| --- | --- | --- | --- |
+| **PS5 Fat / Slim** | `fps=30`, `res_pct=50`, `output_res=0` | **Locked 30** | Eliminates stock 30 FPS dips, cooler/quieter console. |
+| **PS5 Fat / Slim** | `fps=40`, `res_pct=50`–`55`, `refresh_hz=120` | **Locked 40** | Needs forced 120 Hz (`res_pct=50` + `low_shadows=2` / `low_volumetric=1` for steadier city driving). |
+| **PS5 Fat / Slim** | `fps=60`, `res_pct=50`, `output_res=0` | **~44–55+** | Default preset; add `low_shadows=2`/`3`, `low_volumetric=1`, `lod_scale=80` for higher lows. |
+| **PS5 Fat / Slim** | `fps=60`, `res_pct=80`, `output_res=1440`, `base_highres=1` | **~26** | GPU-bound on base PS5; stick to `res_pct=75` (`1920×1080`) or `res_pct=0` (`1706×960`). |
+| **PS5 Pro** | `fps=60`, `res_pct=55`, `output_res=0` | **~50–60** | Recommended Pro preset (PSSR 4K). |
+| **PS5 Pro** | `fps=60`, `res_pct=50`, `pro_rt_half=1` | **~55–60** | Smoothest 60 FPS on Pro (stays inside VRR window). |
+| **PS5 Pro** | `fps=40`, `res_pct=60`–`80`, `refresh_hz=120`, `pro_highres=1` | **Locked 40** | Sharpest playable high-res mode with full RT (`85%+` dips below 30 FPS). |
+
+---
+
 ## Combining `output_res` with `res_pct`
 
 `res_pct` always scales relative to **`output_res`**. With default settings, keep `res_pct` at **`0` or `<= 67`** on base PS5 and **`0` or `<= 66`** on PS5 Pro (higher values require `pro_highres=1` on PS5 Pro at 4K, or experimental `base_highres=1` on base PS5):
@@ -124,13 +147,13 @@ pro_highres=1
 
 ---
 
-## Experimental Performance & Visual Tweaks *(v1.17)*
+## Experimental Performance & Visual Tweaks *(v1.18)*
 
 All tweaks below can be combined with any preset above (load the payload **before** starting GTAVI; see **[SETUP.md](SETUP.md)** for full details):
 
 * **`motion_blur=0`** *(PS5 & PS5 Pro)* — disables motion blur for a noticeably sharper image in motion at `res_pct=50` + small GPU savings.
 * **`pro_taa2u=1`** *(PS5 Pro)* — uses standard TAA2U upscaling instead of PSSR on PS5 Pro (can improve GPU FPS or reduce shimmering on trees/foliage).
-* **`low_shadows=1` / `2`** *(PS5 & PS5 Pro)* — `1` lowers directional shadow map resolution to `1280`; `2` also lowers soft-shadow filtering (`12` → `2`) for extra GPU FPS.
+* **`low_shadows=1` / `2` / `3`** *(PS5 & PS5 Pro)* — `1` lowers directional shadow map to `1280`; `2` also lowers soft-shadow filtering (`12` → `2`); `3` also disables dynamic & LOD ray-traced shadows for maximum GPU savings.
 * **`low_reflections=1`** *(PS5 & PS5 Pro)* — lowers environment reflection map resolution (`256` → `128`).
 * **`low_volumetric=1`** *(PS5 & PS5 Pro)* — lowers volumetric clouds & fog quality (raymarch + lighting) for extra GPU FPS.
 * **`lod_scale=75`** *(PS5 & PS5 Pro, `50`–`100`%)* — lowers draw distance to reduce **both CPU and GPU** load in dense city areas.

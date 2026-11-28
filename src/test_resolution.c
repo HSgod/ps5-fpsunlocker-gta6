@@ -12,8 +12,9 @@ static void run(uint32_t pct, uint32_t highres, uint32_t out) {
 }
 
 int main(void) {
-    run(67, 1, 0);  /* measured clean: 2574x1448 */
-    assert(g_res_w == 2574 && g_res_h == 1448 && g_heap_pages > HEAP_PAGES_STOCK && g_heap_pages <= 0x3900);
+    uint32_t pct;
+    run(67, 1, 0);  /* mod-4 aligned: exact 2560x1440 */
+    assert(g_res_w == 2560 && g_res_h == 1440 && g_heap_pages > HEAP_PAGES_STOCK && g_heap_pages <= 0x3900);
     run(70, 1, 0);  /* measured clean with 0x4000 pages: 2688x1512, no array move */
     assert(g_res_w == 2688 && g_res_h == 1512 && g_heap_pages <= HEAP_PAGES_ARRAY);
     run(80, 1, 0);  /* measured clean: 3072x1728 with 0x5c00 pages (array moved) */
@@ -24,12 +25,27 @@ int main(void) {
     assert(g_res_w == 3840 && g_res_h == 2160 && g_heap_pages <= 0x9a40 && g_heap_pages <= HEAP_PAGES_MAX);
     run(60, 1, 0);  /* below stock: no heap change */
     assert(g_res_w == 2304 && g_res_h == 1296 && g_heap_pages == 0);
-    run(67, 0, 0);  /* without pro_highres: even size, no heap */
-    assert(!(g_res_w & 1) && !(g_res_h & 1) && g_heap_pages == 0);
+    run(67, 0, 0);  /* without pro_highres: mod-4 size, no heap */
+    assert(g_res_w == 2560 && g_res_h == 1440 && g_heap_pages == 0);
     run(50, 0, 1440);
-    assert(!(g_res_w & 1) && !(g_res_h & 1));
+    assert(g_res_w == 1280 && g_res_h == 720);
+    run(67, 0, 1440); /* Issue #25: 1728x972 (even half-res 864x486, no RGB edge speckles) */
+    assert(g_res_w == 1728 && g_res_h == 972);
+    run(67, 0, 1080);
+    assert(g_res_w == 1280 && g_res_h == 720);
     run(0, 1, 0);
     assert(g_scale == 0.0f && g_heap_pages == 0);
+
+    /* Exhaustive check: every res_pct 25..100 on 4K/1440p/1080p must be divisible by 4. */
+    for (pct = MIN_RES_PCT; pct <= MAX_RES_PCT; pct++) {
+        uint32_t outs[3] = { 0, 1440, 1080 };
+        int i;
+        for (i = 0; i < 3; i++) {
+            g_res_pct = pct; g_pro_highres = 0; g_output_res = outs[i];
+            compute_resolution();
+            assert((g_res_w & 3u) == 0 && (g_res_h & 3u) == 0);
+        }
+    }
     puts("all resolution checks passed");
     return 0;
 }

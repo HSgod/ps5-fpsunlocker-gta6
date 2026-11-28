@@ -20,7 +20,7 @@ A lightweight `.elf` runtime payload for jailbroken **PlayStation 5** & **PS5 Pr
 
 ## Usage
 
-1. Load `GTAVI UnlockFPS_v1.17.elf` through your Payload Manager (PLDMGR / `elfldr`).
+1. Load `GTAVI UnlockFPS_v1.18.elf` through your Payload Manager (PLDMGR / `elfldr`).
 2. A PS5 notification will appear confirming the payload is ready and waiting for GTAVI (`PPSA01547` / `PPSA29660` / `PPSA38500`) to launch *(up to 10 minutes in one-shot mode, or indefinitely when `daemon=1`)*.
 3. Start GTAVI *(load the payload **before** starting the game so `TAA2U` / `PSSR` scaling and optional buffer/RT/graphics tweaks apply before render targets are allocated)*.
 4. Once detected, the payload verifies the target code in memory, applies the patches, confirms readback, and either exits automatically (`daemon=0`) or stays running in the background to re-patch future launches (`daemon=1`).
@@ -50,7 +50,7 @@ Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes th
 * Watches running `eboot.bin` processes strictly for `PPSA01547`, `PPSA29660`, and `PPSA38500` without touching memory of system apps or other titles.
 * Resolves the game's ASLR base address and verifies **64 bytes of surrounding context** at every patch site before writing (see [`src/gtavi-unlockfps.c`](src/gtavi-unlockfps.c) for exact RVAs).
 * **FPS Unlock & Delta-Time Speed Fix:** Patches both target FPS writer sites and lowers `fwTimer`'s minimum delta-time floor from `1/30s` to `1/3000s` (`0x39aec33e`) so gameplay runs at exact 1.0× speed at any framerate above 30 FPS.
-* **TAA2U & PSSR Render Resolution Scale:** Patches `TAA2U::Update()` (base PS5) and `PSSR::GetRenderDimensions()` (PS5 Pro) with even width/height rounding so `res_pct` scales internal resolution cleanly without RT reflection speckles.
+* **TAA2U & PSSR Render Resolution Scale:** Patches `TAA2U::Update()` (base PS5) and `PSSR::GetRenderDimensions()` (PS5 Pro) with multiple-of-4 width/height rounding so both full-res and half-res buffers are always even (eliminating RT reflection speckles).
 * **Close-Game `CE-108255-1` Fix (`close_fix=1`):** Bypasses the synchronous `SAVEDATAA00` / `SPACECHECK00.dat` probe (`0x65742c0`) so closing GTAVI no longer triggers `CE-108255-1`.
 * **Early Boot Freeze & Optional Tweaks:** Uses `SIGSTOP`/`SIGCONT` before engine init when boot-time options are enabled (`pro_highres`, `base_highres`, `output_res`, `pro_rt_half`, `pro_taa2u`, `low_shadows`, `low_reflections`, `low_volumetric`, `lod_scale`, `low_bvh`, `motion_blur`, plus `refresh_hz=120` flip-rate dividers).
 * Uses kernel DMAP page-table writes on FW >= 8.40, or `mdbg_copyin` on older firmwares.
@@ -62,7 +62,7 @@ Unlocking the 30 FPS cap (especially combined with a lower `res_pct`) removes th
 chmod +x build.sh
 ./build.sh
 ```
-The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.17.elf`.
+The compiled `.elf` is written to `src/GTAVI UnlockFPS_v1.18.elf`.
 
 ### Local `ps5-payload-sdk`
 ```sh

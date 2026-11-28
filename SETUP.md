@@ -44,7 +44,7 @@ daemon=0
 | `res_pct` | Internal Resolution (at 4K `output_res=0`) | Notes |
 | --- | --- | --- |
 | `70`–`100` | `2688×1512` – `3840×2160` | Requires **`pro_highres=1`** on PS5 Pro (4K output). Tested clean up to `90%` and native 4K. |
-| `67` | `2574×1448` | **Stock PS5 Fat/Slim** (`TAA2U`). Crashes on **PS5 Pro** unless `pro_highres=1` is enabled (use `0` for stock PS5 Pro `2560×1440`). |
+| `67` | `2560×1440` | **Stock PS5 Fat/Slim** (`TAA2U`). Crashes on **PS5 Pro** unless `pro_highres=1` is enabled (use `0` for stock PS5 Pro `2560×1440`). |
 | `60` | `2304×1296` | Sharper middle ground (safe upper limit on **PS5 Pro** without `pro_highres`). |
 | `55` | `2112×1188` | Balanced middle ground between 1080p and 1440p (works on PS5 & PS5 Pro). |
 | **`50`** | **`1920×1080`** | **Default** — ~44% fewer pixels than base PS5 stock, keeps all other graphics settings 100% stock. |
@@ -69,7 +69,7 @@ All options below default to **`0` (stock)** and require loading the payload **b
 
 | Option | Values | Default | What it does |
 | --- | --- | --- | --- |
-| **`low_shadows`** | `0` / `1` / `2` | `0` | `1` = lowers directional shadow map resolution to `1280` (vs `2048`/`4096`); `2` = also lowers soft-shadow filter from `12` to `2` for extra GPU FPS. |
+| **`low_shadows`** | `0`–`3` | `0` | `1` = lowers directional shadow map to `1280` (vs `2048`/`4096`); `2` = + fast soft-shadow filter (`12` → `2`); `3` = + disables dynamic & LOD ray-traced shadows for maximum GPU savings (keeps ocean water & GI intact). |
 | **`low_reflections`** | `0` / `1` | `0` | Lowers environment reflection map resolution from `256` to `128` (4× fewer pixels). |
 | **`low_volumetric`** | `0` / `1` | `0` | Lowers volumetric clouds and fog quality (raymarch + lighting) to low tier for extra GPU FPS. |
 | **`lod_scale`** | `0`, or `50`–`100` | `0` | Draw distance percentage (`0` = stock `100%`, e.g. `75` = `75%`). Reduces **both CPU and GPU** load in dense city areas. |
