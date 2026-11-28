@@ -4,6 +4,7 @@ on:
   push:
     paths-ignore:
       - 'README.md'
+      - 'SETUP.md'
       - 'SETTINGS.md'
       - 'repo.json'
       - 'icons.json'

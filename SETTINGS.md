@@ -1,6 +1,6 @@
 # Recommended Settings (`fps.txt`)
 
-Copy any preset below into `/data/gtavi-unlockfps/fps.txt` over FTP (any omitted options are automatically filled with their defaults, so `close_fix=1` stays enabled). If `daemon=1` is enabled, changes take effect automatically the next time you restart GTAVI (no need to reload the `.elf`).
+Copy any preset below into `/data/gtavi-unlockfps/fps.txt` over FTP (any omitted options are automatically filled with their defaults, so `close_fix=1` stays enabled — see **[SETUP.md](SETUP.md)** for the full list of options). If `daemon=1` is enabled, changes take effect automatically the next time you restart GTAVI (no need to reload the `.elf`).
 
 > **Memory limit for high `res_pct`:** With default settings, going above **`67%`** on base PS5 Fat/Slim or **`66%`** on PS5 Pro will crash the game on startup due to its built-in memory limit (even with `output_res=1440` or `1080`). To go higher (e.g. `70`–`100`), enable **`pro_highres=1`** (PS5 Pro, 4K output — see preset 4) or **`base_highres=1`** *(experimental, base PS5)* and load the payload **before** starting the game.
 
@@ -123,11 +123,15 @@ pro_highres=1
 
 ---
 
-## Experimental GPU & Memory Tweaks *(v1.16)*
+## Experimental Performance & Visual Tweaks *(v1.17)*
 
-All options below default to **`0` (off)** and can be combined with any preset above (load the payload **before** starting GTAVI):
+All tweaks below can be combined with any preset above (load the payload **before** starting GTAVI; see **[SETUP.md](SETUP.md)** for full details):
 
-* **`pro_taa2u=1`** *(PS5 Pro)* — uses standard TAA upscaling instead of PSSR on PS5 Pro (can improve FPS or reduce shimmering on trees/foliage).
-* **`low_shadows=1`** *(PS5 & PS5 Pro)* — lowers shadow resolution for extra FPS.
-* **`low_volumetric=1`** *(PS5 & PS5 Pro)* — lowers fog / volumetric lighting resolution for extra FPS.
-* **`base_highres=1`** *(Base PS5)* — expands base PS5 video memory at startup so you can test `res_pct` above `67` without crashing (e.g. `output_res=1440` with `res_pct=75–100`).
+* **`motion_blur=0`** *(PS5 & PS5 Pro)* — disables motion blur for a noticeably sharper image in motion at `res_pct=50` + small GPU savings.
+* **`pro_taa2u=1`** *(PS5 Pro)* — uses standard TAA2U upscaling instead of PSSR on PS5 Pro (can improve GPU FPS or reduce shimmering on trees/foliage).
+* **`low_shadows=1` / `2`** *(PS5 & PS5 Pro)* — `1` lowers directional shadow map resolution to `1280`; `2` also lowers soft-shadow filtering (`12` → `2`) for extra GPU FPS.
+* **`low_reflections=1`** *(PS5 & PS5 Pro)* — lowers environment reflection map resolution (`256` → `128`).
+* **`low_volumetric=1`** *(PS5 & PS5 Pro)* — lowers volumetric clouds & fog quality (raymarch + lighting) for extra GPU FPS.
+* **`lod_scale=75`** *(PS5 & PS5 Pro, `50`–`100`%)* — lowers draw distance to reduce **both CPU and GPU** load in dense city areas.
+* **`low_bvh=1`** *(PS5 & PS5 Pro)* — lowers the ray-tracing BVH geometry tree quality to reduce **CPU and GPU** RT overhead.
+* **`base_highres=1`** *(Base PS5)* — dynamically expands base PS5 video memory at startup so you can run higher `res_pct` ratios (e.g. `output_res=1440` + `res_pct=75–100`) without crashing.

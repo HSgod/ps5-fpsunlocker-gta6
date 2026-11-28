@@ -43,7 +43,7 @@
 #include <ps5/mdbg.h>
 #endif
 
-#define TOOL_VERSION "1.16"
+#define TOOL_VERSION "1.17"
 
 /* Process name shown by payload managers (PLDMGR lists names ending in .elf;
  * kernel keeps at most 19 chars). */
@@ -105,28 +105,42 @@ static const uint32_t POOL_RVAS[10] = {
 };
 
 /* Base PS5 experimental heap expansion (base_highres=1):
- * Raises Base PS5 transient render heap 0x2d80 (728 MB) -> 0x3800 (896 MB, fits stock 0x4000
- * page array without relocation) and Base PS5 heap #2 (0x9d65728) by +256 MB, shrinking the
- * shared main pool by the same total (+424 MB). */
+ * Dynamically scales Base PS5 transient render heap (stock 0x2d80 = 728 MB) and Base PS5
+ * heap #2 (0x9d65728, stock 2718 MB), shrinking the shared main pool by the same total:
+ *   res_pct <= 75: 0x3800 (896 MB, +168 MB) + heap #2 +256 MB (confirmed on 1440p + 75%)
+ *   res_pct >  75: 0x4000 (1024 MB, +296 MB, fits stock 0x4000 array) + heap #2 +512 MB */
 #define DEFAULT_BASE_HIGHRES  0u
 #define BASE_HEAP_PAGES_RVA   0x3e0fb76u /* imm32 of 'mov ebx, 0x2d80' (Base PS5 pages)  */
 #define BASE_HEAP_PAGES_STOCK 0x2d80u
-#define BASE_HEAP_PAGES_NEW   0x3800u    /* 896 MB (<= HEAP_PAGES_ARRAY = 0x4000)        */
+#define BASE_HEAP_PAGES_MED   0x3800u    /* 896 MB  (res_pct <= 75)                      */
+#define BASE_HEAP_PAGES_HI    0x4000u    /* 1024 MB (res_pct > 75, <= HEAP_PAGES_ARRAY)  */
 #define BASE_HEAP2_RVA        0x9d65728u /* Base PS5 row of per-platform heap table, #2  */
 #define BASE_HEAP2_STOCK      0xa9e00000ull /* 2718 MB */
-#define BASE_HEAP2_ADD        0x10000000ull /* +256 MB */
+#define BASE_HEAP2_ADD_MED    0x10000000ull /* +256 MB */
+#define BASE_HEAP2_ADD_HI     0x20000000ull /* +512 MB */
 
 /* Close-game CE-108255-1 fix (close_fix=1, default ON):
  * Full bypass of the synchronous SAVEDATAA00 / SPACECHECK00.dat probe at 0x65742c0. */
 #define DEFAULT_CLOSE_FIX      1u
 
-/* Experimental GPU / upscaler performance tweaks (all default 0 / OFF):
- *   pro_taa2u=1      : PS5 Pro uses TAA2U instead of PSSR (clears PSSR capability bit 0x10)
- *   low_shadows=1    : forces Shadow Map resolution tier 1 (1280) in ApplySettings
- *   low_volumetric=1 : forces volumetric/reflection map 128 (7 mips) instead of 256 (8 mips) */
-#define DEFAULT_PRO_TAA2U      0u
-#define DEFAULT_LOW_SHADOWS    0u
-#define DEFAULT_LOW_VOLUMETRIC 0u
+/* Motion blur toggle (motion_blur=1 stock default, 0 = off): */
+#define DEFAULT_MOTION_BLUR    1u
+
+/* Experimental GPU / CPU / upscaler performance tweaks (all default 0 / OFF):
+ *   pro_taa2u=1       : PS5 Pro uses TAA2U instead of PSSR (clears PSSR bit 0x10)
+ *   low_shadows=1|2   : 1 = Shadow Map Tier 1 (1280), 2 = + Soft Shadows filter 12 -> 2
+ *   low_reflections=1 : ReflectionQuality map 256 (8 mips) -> 128 (7 mips)
+ *   low_volumetric=1  : VolumetricsRaymarch + VolumetricsLighting -> Tier 0 (low)
+ *   lod_scale=50..100 : LodScale draw distance % (0 = stock, 50..100 = 0.50x..1.00x)
+ *   low_bvh=1         : BvhQuality -> Tier 0 (lighter RT acceleration structure) */
+#define DEFAULT_PRO_TAA2U       0u
+#define DEFAULT_LOW_SHADOWS     0u
+#define DEFAULT_LOW_REFLECTIONS 0u
+#define DEFAULT_LOW_VOLUMETRIC  0u
+#define DEFAULT_LOD_SCALE       0u
+#define MIN_LOD_SCALE           50u
+#define MAX_LOD_SCALE           100u
+#define DEFAULT_LOW_BVH         0u
 
 /* RVAs relative to eboot.bin map base (vaddr 0x0 in ELF PHDR 0). */
 #define SITE1_RVA       0x3f73e51u /* mov eax, dword ptr [rbx + 0xe1c]  (6 bytes)  */
@@ -152,25 +166,51 @@ static const uint32_t POOL_RVAS[10] = {
 #define OUT_H2_RVA      0x3f73dd7u /* mov ecx, dword ptr [rbx + 0xe14]  (6 bytes)  */
 #define OUT_LEN         6u
 
-/* PS5 Pro RT Reflections quality tier load (0x9dca910 table): */
-#define PRO_RT_HALF_RVA    0x6326444u /* mov ecx, dword ptr [rdi + 0x54]   (3 bytes)  */
-#define PRO_RT_HALF_LEN    3u
+/* PS5 Pro GlobalIlluminationQuality (0xc6c) tier loads (all 4 readers -> Tier 0): */
+#define PRO_RT_HALF_RVA     0x6326444u /* mov ecx, dword ptr [rdi + 0x54]   (3 bytes)  */
+#define PRO_RT_HALF_LEN     3u
+#define PRO_RT_HALF2_RVA    0x62fee1fu /* mov r15d, dword ptr [r14 + 0x54]  (4 bytes)  */
+#define PRO_RT_HALF2_LEN    4u
+#define PRO_RT_HALF3_RVA    0x630e948u /* mov edi, dword ptr [rax + 0x464]  (6 bytes)  */
+#define PRO_RT_HALF3_LEN    6u
+#define PRO_RT_HALF4_RVA    0x2998c33u /* mov edi, dword ptr [rax + 0x464]  (6 bytes)  */
+#define PRO_RT_HALF4_LEN    6u
 
 /* Close-game CE-108255-1 fix: full bypass of SAVEDATAA00/SPACECHECK00.dat probe: */
-#define CLOSE_FIX_RVA      0x65742c0u /* lea rbx, [rbp - 0x1ac]            (7 bytes)  */
-#define CLOSE_FIX_LEN      7u
+#define CLOSE_FIX_RVA       0x65742c0u /* lea rbx, [rbp - 0x1ac]            (7 bytes)  */
+#define CLOSE_FIX_LEN       7u
 
 /* PS5 Pro PSSR -> TAA2U switch (clears PSSR capability bit 0x10 in 0xb3d212c): */
-#define PRO_TAA2U_RVA      0x2afc2c9u /* call qword ptr [rax + 0x10]       (3 bytes)  */
-#define PRO_TAA2U_LEN      3u
+#define PRO_TAA2U_RVA       0x2afc2c9u /* call qword ptr [rax + 0x10]       (3 bytes)  */
+#define PRO_TAA2U_LEN       3u
 
-/* Shadow Map resolution tier load in CSettingsManager::ApplySettings (0x9aafca0 table): */
-#define LOW_SHADOWS_RVA    0x3f74417u /* mov eax, dword ptr [rbx + 0xc64]  (6 bytes)  */
-#define LOW_SHADOWS_LEN    6u
+/* DirectionalShadowQuality (0xc64 -> 1280) & ShadowSoftShadows (0xd70 -> filter 2): */
+#define LOW_SHADOWS_RVA     0x3f74417u /* mov eax, dword ptr [rbx + 0xc64]  (6 bytes)  */
+#define LOW_SHADOWS_LEN     6u
+#define LOW_SHADOWS2_RVA    0x3f74350u /* mov eax, dword ptr [rax + 0x568]  (6 bytes)  */
+#define LOW_SHADOWS2_LEN    6u
 
-/* Volumetric / reflection map resolution check in CSettingsManager::ApplySettings: */
-#define LOW_VOLUMETRIC_RVA 0x3f73f11u /* cmp dword ptr [rbx + 0xc88], 0    (7 bytes)  */
-#define LOW_VOLUMETRIC_LEN 7u
+/* ReflectionQuality (0xc88) map size check in ApplySettings (256 -> 128): */
+#define LOW_REFLECTIONS_RVA 0x3f73f11u /* cmp dword ptr [rbx + 0xc88], 0    (7 bytes)  */
+#define LOW_REFLECTIONS_LEN 7u
+
+/* VolumetricsRaymarchQuality (0xda8) & VolumetricsLightingQuality (0xda4) -> Tier 0: */
+#define LOW_VOL1_RVA        0x3f741b9u /* mov eax, dword ptr [rbx + 0xda8]  (6 bytes)  */
+#define LOW_VOL2_RVA        0x3f741c5u /* mov eax, dword ptr [rbx + 0xda4]  (6 bytes)  */
+#define LOW_VOL_LEN         6u
+
+/* LodScale (0xce8 -> 0xd796908) 16-byte load+store in ApplySettings: */
+#define LOD_SCALE_RVA       0x3f73f47u /* vmovss xmm0, [rbx+0xce8] + store  (16 bytes) */
+#define LOD_SCALE_LEN       16u
+
+/* BvhQuality (0xcbc -> 0xa919914) load in ApplySettings: */
+#define LOW_BVH_RVA         0x3f7444fu /* mov eax, dword ptr [rbx + 0xcbc]  (6 bytes)  */
+#define LOW_BVH_LEN         6u
+
+/* MotionBlur (0xd30 -> 0xc62c3ec) loads: */
+#define MOTION_BLUR1_RVA    0x4067792u /* mov al, byte ptr [rax + 0x528]    (6 bytes)  */
+#define MOTION_BLUR2_RVA    0x64bbf36u /* mov al, byte ptr [rax + 0x528]    (6 bytes)  */
+#define MOTION_BLUR_LEN     6u
 
 /* TAA2U::Update() (vtable+0x50 of base PS5 upscaler 0xb3d2db0):
  *   vbroadcastss xmm0, [0x9c7b9ec]  (0.6666667f)
@@ -189,6 +229,7 @@ static const uint32_t POOL_RVAS[10] = {
 #define G_REQUESTED_FRAMELOCK_RVA 0xe7bbb08u /* uint8_t:  0xff = auto   */
 #define G_MIN_FRAME_SEC_RVA       0xabab49cu /* float: fwTimer min dt   */
 #define G_TARGET_FRAME_SEC_RVA    0xabab4a0u /* float: fwTimer floor dt */
+#define G_MOTION_BLUR_RVA         0xc62c3ecu /* uint8_t: MotionBlur     */
 
 #define CTX_OFF 32u
 
@@ -331,12 +372,84 @@ static const uint8_t LOW_SHADOWS_CTX[64] = {
     0xb8,0xb3,0x05,0xc5,0xfa,0x10,0x0c,0x81,0xc5,0xfa,0x5e,0xc1,0xc4,0xe2,0x79,0x18
 };
 
-/* 64-byte context for volumetric/reflection map check (site at +32, len 7): */
-static const uint8_t LOW_VOLUMETRIC_CTX[64] = {
+/* 64-byte context for ReflectionQuality (0xc88) map size check (site at +32, len 7): */
+static const uint8_t LOW_REFLECTIONS_CTX[64] = {
     0xff,0xff,0xc5,0xfa,0x11,0x05,0xa5,0x75,0xc3,0x06,0x0f,0xb6,0x83,0x18,0x0e,0x00,
     0x00,0x83,0xc8,0x02,0x89,0x05,0xb9,0x7b,0x84,0x0a,0x8b,0x05,0xbf,0xe3,0xf5,0x07,
     0x83,0xbb,0x88,0x0c,0x00,0x00,0x00,0xc6,0x05,0xcd,0x17,0xf6,0x07,0x01,0x0f,0x9f,
     0xc1,0xc4,0xe2,0x71,0xf7,0xd2,0x8d,0x71,0x07,0x89,0x0d,0xa0,0xe3,0xf5,0x07,0x89
+};
+
+/* 64-byte contexts for remaining 3 GlobalIlluminationQuality (0xc6c) readers: */
+static const uint8_t PRO_RT_HALF2_CTX[64] = {
+    0x00,0xff,0xce,0x83,0xfe,0x0e,0x77,0x16,0x89,0xf0,0x48,0x8d,0x0d,0x08,0x3a,0xba,
+    0x03,0x48,0x8d,0x15,0x3d,0x3a,0xba,0x03,0x8b,0x0c,0x81,0x8b,0x3c,0x82,0x89,0xc8,
+    0x45,0x8b,0x7e,0x54,0x41,0x0f,0xaf,0xc9,0x41,0x0f,0xaf,0xc0,0x99,0xf7,0xff,0x41,
+    0x89,0xc4,0x89,0x45,0xa0,0x89,0xc8,0x99,0xf7,0xff,0x48,0x83,0x3d,0x37,0x81,0x3b
+};
+static const uint8_t PRO_RT_HALF3_CTX[64] = {
+    0x0b,0x46,0x08,0x48,0x8d,0x15,0x7e,0xcd,0xa1,0xfb,0x48,0x8b,0x40,0x08,0x48,0x8b,
+    0x08,0x48,0x8b,0x49,0x50,0x48,0x39,0xd1,0x75,0x1a,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8b,0xb8,0x64,0x04,0x00,0x00,0xe8,0xad,0xa5,0xf3,0xfd,0xc6,0x05,0x3e,0xfb,0x5f,
+    0x04,0x01,0x5d,0xc3,0x48,0x89,0xc7,0xff,0xd1,0xeb,0xe5,0xcc,0xcc,0xcc,0xcc,0xcc
+};
+static const uint8_t PRO_RT_HALF4_CTX[64] = {
+    0x68,0xdd,0x0b,0x48,0x8d,0x15,0x93,0x2a,0x39,0xff,0x48,0x8b,0x40,0x08,0x48,0x8b,
+    0x08,0x48,0x8b,0x49,0x50,0x48,0x39,0xd1,0x75,0x4c,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8b,0xb8,0x64,0x04,0x00,0x00,0xe8,0xc2,0x02,0x8b,0x01,0xb0,0x01,0x88,0x05,0x52,
+    0x58,0xf7,0x07,0x88,0x05,0xf8,0x7a,0xa5,0x08,0x49,0x8b,0x07,0x48,0x3b,0x43,0x48
+};
+
+/* 64-byte contexts for VolumetricsRaymarchQuality (0xda8) & VolumetricsLightingQuality (0xda4): */
+static const uint8_t LOW_VOL1_CTX[64] = {
+    0x79,0x0c,0x83,0x10,0x0d,0x00,0x00,0x03,0xc5,0xf8,0x11,0x05,0x77,0x8c,0x41,0x08,
+    0xc5,0xfa,0x10,0x83,0x1c,0x0d,0x00,0x00,0xc5,0xfa,0x11,0x05,0x77,0x8c,0x41,0x08,
+    0x8b,0x83,0xa8,0x0d,0x00,0x00,0x89,0x05,0xa3,0x0b,0xed,0x07,0x8b,0x83,0xa4,0x0d,
+    0x00,0x00,0x89,0x05,0x9b,0x0b,0xed,0x07,0x8b,0x83,0x58,0x0c,0x00,0x00,0x89,0x05
+};
+static const uint8_t LOW_VOL2_CTX[64] = {
+    0x77,0x8c,0x41,0x08,0xc5,0xfa,0x10,0x83,0x1c,0x0d,0x00,0x00,0xc5,0xfa,0x11,0x05,
+    0x77,0x8c,0x41,0x08,0x8b,0x83,0xa8,0x0d,0x00,0x00,0x89,0x05,0xa3,0x0b,0xed,0x07,
+    0x8b,0x83,0xa4,0x0d,0x00,0x00,0x89,0x05,0x9b,0x0b,0xed,0x07,0x8b,0x83,0x58,0x0c,
+    0x00,0x00,0x89,0x05,0xaf,0x12,0x14,0x09,0x8a,0x83,0x90,0x0d,0x00,0x00,0x88,0x05
+};
+
+/* 64-byte context for ShadowSoftShadows (0xd70 -> filter 2/7/11/12): */
+static const uint8_t LOW_SHADOWS2_CTX[64] = {
+    0x8b,0x05,0xda,0xb1,0x7f,0x0a,0x48,0x8b,0x40,0x08,0x48,0x8b,0x08,0x48,0x8b,0x49,
+    0x50,0x4c,0x39,0xf9,0x0f,0x85,0xce,0x03,0x00,0x00,0x48,0x05,0x08,0x08,0x00,0x00,
+    0x8b,0x80,0x68,0x05,0x00,0x00,0x85,0xc0,0x7e,0x18,0x31,0xc9,0x83,0xf8,0x02,0x0f,
+    0x95,0xc1,0x83,0xc1,0x0b,0x83,0xf8,0x01,0xb8,0x07,0x00,0x00,0x00,0x0f,0x45,0xc1
+};
+
+/* 64-byte context for LodScale (0xce8 -> 0xd796908) 16-byte load+store: */
+static const uint8_t LOD_SCALE_CTX[64] = {
+    0x8d,0x71,0x07,0x89,0x0d,0xa0,0xe3,0xf5,0x07,0x89,0x15,0x82,0xe3,0xf5,0x07,0x89,
+    0x35,0x80,0xe3,0xf5,0x07,0x39,0xc8,0x74,0x07,0xc6,0x05,0x79,0x09,0xf1,0x07,0x01,
+    0xc5,0xfa,0x10,0x83,0xe8,0x0c,0x00,0x00,0xc5,0xfa,0x11,0x05,0xb1,0x29,0x82,0x09,
+    0xe8,0xd4,0xf3,0x43,0x02,0x8b,0xbb,0x84,0x0c,0x00,0x00,0x8b,0xb3,0x3c,0x0d,0x00
+};
+
+/* 64-byte context for BvhQuality (0xcbc -> 0xa919914): */
+static const uint8_t LOW_BVH_CTX[64] = {
+    0xc5,0xfa,0x5e,0xc1,0xc4,0xe2,0x79,0x18,0xc8,0xc5,0xf8,0x11,0x0d,0x40,0x27,0xf1,
+    0x07,0xc5,0xfa,0x11,0x05,0x48,0x27,0xf1,0x07,0xc6,0x05,0x00,0x29,0xf1,0x07,0x01,
+    0x8b,0x83,0xbc,0x0c,0x00,0x00,0x89,0x05,0xb9,0x54,0x9a,0x06,0x8b,0x83,0x80,0x0d,
+    0x00,0x00,0x89,0x05,0xc5,0x02,0xf1,0x07,0x8b,0x93,0x74,0x0c,0x00,0x00,0x8b,0x83
+};
+
+/* 64-byte contexts for MotionBlur (0xd30 -> 0xc62c3ec) loads: */
+static const uint8_t MOTION_BLUR1_CTX[64] = {
+    0xc5,0xfa,0x11,0x0d,0x76,0x4c,0x5c,0x08,0xc5,0xfa,0x11,0x0d,0xba,0x4c,0x5c,0x08,
+    0xc5,0xfa,0x10,0x80,0x30,0x05,0x00,0x00,0xc5,0xfa,0x11,0x05,0x62,0x4c,0x5c,0x08,
+    0x8a,0x80,0x28,0x05,0x00,0x00,0x88,0x05,0x4e,0x4c,0x5c,0x08,0x5d,0xe9,0x9c,0x59,
+    0x93,0xfe,0x48,0x89,0xc7,0xff,0xd1,0xc5,0xfa,0x10,0x05,0x3f,0x4c,0x5c,0x08,0xeb
+};
+static const uint8_t MOTION_BLUR2_CTX[64] = {
+    0x00,0xc5,0xfa,0x10,0x80,0x30,0x05,0x00,0x00,0x48,0x63,0x0d,0x8e,0xcd,0x8f,0x04,
+    0xc5,0xf0,0x57,0xc9,0xc5,0xe8,0x57,0xd2,0xc5,0xfa,0x11,0x05,0xbe,0x04,0x17,0x06,
+    0x8a,0x80,0x28,0x05,0x00,0x00,0x88,0x05,0xaa,0x04,0x17,0x06,0x48,0x85,0xc9,0x0f,
+    0x8e,0x1a,0x02,0x00,0x00,0x48,0x8d,0x15,0x5e,0xcd,0x8f,0x04,0x45,0x31,0xff,0x48
 };
 
 #ifndef LOG_DIR
@@ -390,9 +503,13 @@ static uint32_t g_pro_rt_half = DEFAULT_PRO_RT_HALF;
 static uint32_t g_daemon = DEFAULT_DAEMON;
 static uint32_t g_pro_highres = DEFAULT_PRO_HIGHRES;
 static uint32_t g_close_fix = DEFAULT_CLOSE_FIX;
+static uint32_t g_motion_blur = DEFAULT_MOTION_BLUR;
 static uint32_t g_pro_taa2u = DEFAULT_PRO_TAA2U;
 static uint32_t g_low_shadows = DEFAULT_LOW_SHADOWS;
+static uint32_t g_low_reflections = DEFAULT_LOW_REFLECTIONS;
 static uint32_t g_low_volumetric = DEFAULT_LOW_VOLUMETRIC;
+static uint32_t g_lod_scale = DEFAULT_LOD_SCALE;
+static uint32_t g_low_bvh = DEFAULT_LOW_BVH;
 static uint32_t g_base_highres = DEFAULT_BASE_HIGHRES;
 static float g_scale;            /* final render scale (even width and height) */
 static uint32_t g_res_w, g_res_h;  /* resulting internal resolution */
@@ -480,9 +597,13 @@ static void load_settings(void) {
     int saw_daemon = 0;
     int saw_pro_highres = 0;
     int saw_close_fix = 0;
+    int saw_motion_blur = 0;
     int saw_pro_taa2u = 0;
     int saw_low_shadows = 0;
+    int saw_low_reflections = 0;
     int saw_low_volumetric = 0;
+    int saw_lod_scale = 0;
+    int saw_low_bvh = 0;
     int saw_base_highres = 0;
     FILE *f;
 
@@ -494,46 +615,66 @@ static void load_settings(void) {
     g_pro_rt_half = DEFAULT_PRO_RT_HALF;
     g_daemon = DEFAULT_DAEMON;
     g_close_fix = DEFAULT_CLOSE_FIX;
+    g_motion_blur = DEFAULT_MOTION_BLUR;
     g_pro_taa2u = DEFAULT_PRO_TAA2U;
     g_low_shadows = DEFAULT_LOW_SHADOWS;
+    g_low_reflections = DEFAULT_LOW_REFLECTIONS;
     g_low_volumetric = DEFAULT_LOW_VOLUMETRIC;
+    g_lod_scale = DEFAULT_LOD_SCALE;
+    g_low_bvh = DEFAULT_LOW_BVH;
     g_base_highres = DEFAULT_BASE_HIGHRES;
 
     f = fopen(CONF_PATH, "r");
     if (!f) {
         f = fopen(CONF_PATH, "w");
         if (f) {
-            fprintf(f, "# GTAVI Unlock FPS runtime patcher settings\n"
-                       "# fps: target FPS cap (30..120). On 60 Hz output: 30 = 30 FPS, 31..120 = up to 60 FPS.\n"
-                       "#   With forced 120 Hz + refresh_hz=120: 30, 40, 60, or 120 FPS hardware locks.\n"
-                       "# res_pct: internal TAA2U (PS5) / PSSR (PS5 Pro) resolution %% of output:\n"
-                       "#   0 = stock, 50 = 1080p (default), 55/60 = middle ground, 25..49 = experimental\n"
-                       "# refresh_hz: 60 = stock (default), 120 = use when forcing 120 Hz via PS Patch System\n"
-                       "# output_res: 0 = stock 4K (default), 1440 = 2560x1440, 1080 = 1920x1080 (experimental)\n"
-                       "# pro_rt_half: 0 = stock (default), 1 = PS5 Pro half-res RT Reflections (experimental)\n"
-                       "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
-                       "# pro_highres: 0 = off (default), 1 = PS5 Pro res_pct above stock (up to ~90%%/4K, needs 4K output)\n"
-                       "# close_fix: 1 = fix CE-108255-1 on game close (default), 0 = stock\n"
-                       "# pro_taa2u: 0 = stock PSSR on PS5 Pro (default), 1 = switch PS5 Pro to TAA2U (experimental)\n"
-                       "# low_shadows: 0 = stock (default), 1 = lower Shadow Map resolution tier to 1280 (experimental)\n"
-                       "# low_volumetric: 0 = stock (default), 1 = lower volumetric/reflection map 256 -> 128 (experimental)\n"
-                       "# base_highres: 0 = off (default), 1 = base PS5 heap expansion for higher res_pct (experimental)\n"
+            fprintf(f, "# GTAVI Unlock FPS v%s settings (/data/gtavi-unlockfps/fps.txt)\n"
+                       "#\n"
+                       "# --- Framerate & Display ---\n"
+                       "# fps: target FPS cap (30..120). 60 Hz TV: 30=locked 30, 60=up to 60. 120 Hz: also 40.\n"
                        "fps=%u\n"
+                       "# res_pct: internal render resolution %% (0=stock, 50=1080p default, 25..100)\n"
                        "res_pct=%u\n"
+                       "# refresh_hz: 60=standard TV (default), 120=only when forcing 120 Hz via ps-patch-system\n"
                        "refresh_hz=%u\n"
+                       "# output_res: output resolution (0=4K default, 1440=1440p, 1080=1080p, experimental)\n"
                        "output_res=%u\n"
-                       "pro_rt_half=%u\n"
-                       "daemon=%u\n"
+                       "# motion_blur: 1=game default, 0=disable motion blur (sharper image at lower res_pct)\n"
+                       "motion_blur=%u\n"
+                       "#\n"
+                       "# --- PS5 Pro Options ---\n"
+                       "# pro_highres: 1=expand PS5 Pro memory for res_pct above 66%% (up to 90%%/4K, needs 4K output)\n"
                        "pro_highres=%u\n"
-                       "close_fix=%u\n"
+                       "# pro_rt_half: 1=lower PS5 Pro RT/GI quality to base PS5 tier for higher FPS (experimental)\n"
+                       "pro_rt_half=%u\n"
+                       "# pro_taa2u: 1=use TAA2U instead of PSSR on PS5 Pro (extra GPU headroom / less shimmer)\n"
                        "pro_taa2u=%u\n"
+                       "#\n"
+                       "# --- Performance & Graphics Tweaks (Experimental, 0=stock) ---\n"
+                       "# low_shadows: 0=stock, 1=1280 shadow map, 2=1280 shadow map + fast soft shadows\n"
                        "low_shadows=%u\n"
+                       "# low_reflections: 1=lower reflection map resolution (256 -> 128)\n"
+                       "low_reflections=%u\n"
+                       "# low_volumetric: 1=lower volumetric clouds/fog quality for extra GPU FPS\n"
                        "low_volumetric=%u\n"
-                       "base_highres=%u\n",
-                       DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_REFRESH_HZ,
-                       DEFAULT_OUTPUT_RES, DEFAULT_PRO_RT_HALF, DEFAULT_DAEMON,
-                       DEFAULT_PRO_HIGHRES, DEFAULT_CLOSE_FIX, DEFAULT_PRO_TAA2U,
-                       DEFAULT_LOW_SHADOWS, DEFAULT_LOW_VOLUMETRIC, DEFAULT_BASE_HIGHRES);
+                       "# lod_scale: draw distance %% (0=stock, 50..100 = 50%%..100%%, reduces CPU+GPU load)\n"
+                       "lod_scale=%u\n"
+                       "# low_bvh: 1=lighter ray-tracing BVH geometry tree (reduces CPU+GPU RT load)\n"
+                       "low_bvh=%u\n"
+                       "# base_highres: 1=expand base PS5 memory for res_pct above 67%% (e.g. 1440p + 75..100%%)\n"
+                       "base_highres=%u\n"
+                       "#\n"
+                       "# --- Stability & Behavior ---\n"
+                       "# close_fix: 1=prevent CE-108255-1 error when closing the game (default), 0=stock\n"
+                       "close_fix=%u\n"
+                       "# daemon: 0=patch once and exit (default), 1=stay in background across game restarts\n"
+                       "daemon=%u\n",
+                       TOOL_VERSION,
+                       DEFAULT_FPS, DEFAULT_RES_PCT, DEFAULT_REFRESH_HZ, DEFAULT_OUTPUT_RES,
+                       DEFAULT_MOTION_BLUR, DEFAULT_PRO_HIGHRES, DEFAULT_PRO_RT_HALF,
+                       DEFAULT_PRO_TAA2U, DEFAULT_LOW_SHADOWS, DEFAULT_LOW_REFLECTIONS,
+                       DEFAULT_LOW_VOLUMETRIC, DEFAULT_LOD_SCALE, DEFAULT_LOW_BVH,
+                       DEFAULT_BASE_HIGHRES, DEFAULT_CLOSE_FIX, DEFAULT_DAEMON);
             fclose(f);
             logmsg("INFO", "wrote default settings to %s", CONF_PATH);
         }
@@ -594,6 +735,13 @@ static void load_settings(void) {
             } else {
                 logmsg("WARN", "ignoring close_fix=%d (must be 0 or 1)", v);
             }
+        } else if (!strncmp(line, "motion_blur", 11)) {
+            saw_motion_blur = 1;
+            if (v == 0 || v == 1) {
+                g_motion_blur = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring motion_blur=%d (must be 0 or 1)", v);
+            }
         } else if (!strncmp(line, "pro_taa2u", 9)) {
             saw_pro_taa2u = 1;
             if (v == 0 || v == 1) {
@@ -603,10 +751,17 @@ static void load_settings(void) {
             }
         } else if (!strncmp(line, "low_shadows", 11)) {
             saw_low_shadows = 1;
-            if (v == 0 || v == 1) {
+            if (v >= 0 && v <= 2) {
                 g_low_shadows = (uint32_t)v;
             } else {
-                logmsg("WARN", "ignoring low_shadows=%d (must be 0 or 1)", v);
+                logmsg("WARN", "ignoring low_shadows=%d (must be 0, 1, or 2)", v);
+            }
+        } else if (!strncmp(line, "low_reflections", 15)) {
+            saw_low_reflections = 1;
+            if (v == 0 || v == 1) {
+                g_low_reflections = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring low_reflections=%d (must be 0 or 1)", v);
             }
         } else if (!strncmp(line, "low_volumetric", 14)) {
             saw_low_volumetric = 1;
@@ -614,6 +769,21 @@ static void load_settings(void) {
                 g_low_volumetric = (uint32_t)v;
             } else {
                 logmsg("WARN", "ignoring low_volumetric=%d (must be 0 or 1)", v);
+            }
+        } else if (!strncmp(line, "lod_scale", 9)) {
+            saw_lod_scale = 1;
+            if (v == 0 || (v >= (int)MIN_LOD_SCALE && v <= (int)MAX_LOD_SCALE)) {
+                g_lod_scale = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring lod_scale=%d (must be 0 or %u..%u)",
+                       v, MIN_LOD_SCALE, MAX_LOD_SCALE);
+            }
+        } else if (!strncmp(line, "low_bvh", 7)) {
+            saw_low_bvh = 1;
+            if (v == 0 || v == 1) {
+                g_low_bvh = (uint32_t)v;
+            } else {
+                logmsg("WARN", "ignoring low_bvh=%d (must be 0 or 1)", v);
             }
         } else if (!strncmp(line, "base_highres", 12)) {
             saw_base_highres = 1;
@@ -635,62 +805,83 @@ static void load_settings(void) {
     fclose(f);
 
     if (!saw_res_pct || !saw_refresh_hz || !saw_output_res || !saw_pro_rt_half || !saw_daemon ||
-        !saw_pro_highres || !saw_close_fix || !saw_pro_taa2u || !saw_low_shadows ||
-        !saw_low_volumetric || !saw_base_highres) {
+        !saw_pro_highres || !saw_close_fix || !saw_motion_blur || !saw_pro_taa2u ||
+        !saw_low_shadows || !saw_low_reflections || !saw_low_volumetric || !saw_lod_scale ||
+        !saw_low_bvh || !saw_base_highres) {
         f = fopen(CONF_PATH, "a");
         if (f) {
             if (!saw_pro_highres) {
-                fprintf(f, "# pro_highres: 0 = off (default), 1 = PS5 Pro res_pct above stock (up to ~90%%/4K, needs 4K output)\n"
+                fprintf(f, "# pro_highres: 1=expand PS5 Pro memory for res_pct above 66%% (up to 90%%/4K, needs 4K output)\n"
                            "pro_highres=%u\n", DEFAULT_PRO_HIGHRES);
                 logmsg("INFO", "appended default pro_highres=%u to %s", DEFAULT_PRO_HIGHRES, CONF_PATH);
             }
             if (!saw_res_pct) {
-                fprintf(f, "# res_pct: internal resolution %% (0=stock, 50=1080p, 25..49=experimental)\n"
+                fprintf(f, "# res_pct: internal render resolution %% (0=stock, 50=1080p default, 25..100)\n"
                            "res_pct=%u\n", DEFAULT_RES_PCT);
                 logmsg("INFO", "appended default res_pct=%u to %s", DEFAULT_RES_PCT, CONF_PATH);
             }
             if (!saw_refresh_hz) {
-                fprintf(f, "# refresh_hz: 60 = stock (default), 120 = use when forcing 120 Hz via PS Patch System\n"
+                fprintf(f, "# refresh_hz: 60=standard TV (default), 120=only when forcing 120 Hz via ps-patch-system\n"
                            "refresh_hz=%u\n", DEFAULT_REFRESH_HZ);
                 logmsg("INFO", "appended default refresh_hz=%u to %s", DEFAULT_REFRESH_HZ, CONF_PATH);
             }
             if (!saw_output_res) {
-                fprintf(f, "# output_res: 0 = stock 4K (default), 1440 = 2560x1440, 1080 = 1920x1080 (experimental)\n"
+                fprintf(f, "# output_res: output resolution (0=4K default, 1440=1440p, 1080=1080p, experimental)\n"
                            "output_res=%u\n", DEFAULT_OUTPUT_RES);
                 logmsg("INFO", "appended default output_res=%u to %s", DEFAULT_OUTPUT_RES, CONF_PATH);
             }
             if (!saw_pro_rt_half) {
-                fprintf(f, "# pro_rt_half: 0 = stock (default), 1 = PS5 Pro half-res RT Reflections (experimental)\n"
+                fprintf(f, "# pro_rt_half: 1=lower PS5 Pro RT/GI quality to base PS5 tier for higher FPS (experimental)\n"
                            "pro_rt_half=%u\n", DEFAULT_PRO_RT_HALF);
                 logmsg("INFO", "appended default pro_rt_half=%u to %s", DEFAULT_PRO_RT_HALF, CONF_PATH);
             }
             if (!saw_daemon) {
-                fprintf(f, "# daemon: 0 = one-shot (default), 1 = stay in background and re-patch on game restarts\n"
+                fprintf(f, "# daemon: 0=patch once and exit (default), 1=stay in background across game restarts\n"
                            "daemon=%u\n", DEFAULT_DAEMON);
                 logmsg("INFO", "appended default daemon=%u to %s", DEFAULT_DAEMON, CONF_PATH);
             }
             if (!saw_close_fix) {
-                fprintf(f, "# close_fix: 1 = fix CE-108255-1 on game close (default), 0 = stock\n"
+                fprintf(f, "# close_fix: 1=prevent CE-108255-1 error when closing the game (default), 0=stock\n"
                            "close_fix=%u\n", DEFAULT_CLOSE_FIX);
                 logmsg("INFO", "appended default close_fix=%u to %s", DEFAULT_CLOSE_FIX, CONF_PATH);
             }
+            if (!saw_motion_blur) {
+                fprintf(f, "# motion_blur: 1=game default, 0=disable motion blur (sharper image at lower res_pct)\n"
+                           "motion_blur=%u\n", DEFAULT_MOTION_BLUR);
+                logmsg("INFO", "appended default motion_blur=%u to %s", DEFAULT_MOTION_BLUR, CONF_PATH);
+            }
             if (!saw_pro_taa2u) {
-                fprintf(f, "# pro_taa2u: 0 = stock PSSR on PS5 Pro (default), 1 = switch PS5 Pro to TAA2U (experimental)\n"
+                fprintf(f, "# pro_taa2u: 1=use TAA2U instead of PSSR on PS5 Pro (extra GPU headroom / less shimmer)\n"
                            "pro_taa2u=%u\n", DEFAULT_PRO_TAA2U);
                 logmsg("INFO", "appended default pro_taa2u=%u to %s", DEFAULT_PRO_TAA2U, CONF_PATH);
             }
             if (!saw_low_shadows) {
-                fprintf(f, "# low_shadows: 0 = stock (default), 1 = lower Shadow Map resolution tier to 1280 (experimental)\n"
+                fprintf(f, "# low_shadows: 0=stock, 1=1280 shadow map, 2=1280 shadow map + fast soft shadows\n"
                            "low_shadows=%u\n", DEFAULT_LOW_SHADOWS);
                 logmsg("INFO", "appended default low_shadows=%u to %s", DEFAULT_LOW_SHADOWS, CONF_PATH);
             }
+            if (!saw_low_reflections) {
+                fprintf(f, "# low_reflections: 1=lower reflection map resolution (256 -> 128, experimental)\n"
+                           "low_reflections=%u\n", DEFAULT_LOW_REFLECTIONS);
+                logmsg("INFO", "appended default low_reflections=%u to %s", DEFAULT_LOW_REFLECTIONS, CONF_PATH);
+            }
             if (!saw_low_volumetric) {
-                fprintf(f, "# low_volumetric: 0 = stock (default), 1 = lower volumetric/reflection map 256 -> 128 (experimental)\n"
+                fprintf(f, "# low_volumetric: 1=lower volumetric clouds/fog quality for extra GPU FPS (experimental)\n"
                            "low_volumetric=%u\n", DEFAULT_LOW_VOLUMETRIC);
                 logmsg("INFO", "appended default low_volumetric=%u to %s", DEFAULT_LOW_VOLUMETRIC, CONF_PATH);
             }
+            if (!saw_lod_scale) {
+                fprintf(f, "# lod_scale: draw distance %% (0=stock, 50..100 = 50%%..100%%, reduces CPU+GPU load, experimental)\n"
+                           "lod_scale=%u\n", DEFAULT_LOD_SCALE);
+                logmsg("INFO", "appended default lod_scale=%u to %s", DEFAULT_LOD_SCALE, CONF_PATH);
+            }
+            if (!saw_low_bvh) {
+                fprintf(f, "# low_bvh: 1=lighter ray-tracing BVH geometry tree (reduces CPU+GPU RT load, experimental)\n"
+                           "low_bvh=%u\n", DEFAULT_LOW_BVH);
+                logmsg("INFO", "appended default low_bvh=%u to %s", DEFAULT_LOW_BVH, CONF_PATH);
+            }
             if (!saw_base_highres) {
-                fprintf(f, "# base_highres: 0 = off (default), 1 = base PS5 heap expansion for higher res_pct (experimental)\n"
+                fprintf(f, "# base_highres: 1=expand base PS5 memory for res_pct above 67%% (e.g. 1440p + 75..100%%, experimental)\n"
                            "base_highres=%u\n", DEFAULT_BASE_HIGHRES);
                 logmsg("INFO", "appended default base_highres=%u to %s", DEFAULT_BASE_HIGHRES, CONF_PATH);
             }
@@ -930,6 +1121,12 @@ static void update_live_globals(uint32_t pid, uint64_t base) {
     } else {
         logmsg("WARN", "could not update live g_TargetFrameTimeUs (non-fatal)");
     }
+
+    if (!g_motion_blur) {
+        uint8_t zero = 0;
+        if (!proc_write(pid, base + G_MOTION_BLUR_RVA, &zero, 1))
+            logmsg("OK", "disabled live MotionBlur global");
+    }
 }
 
 static int is_skipped_pid(const uint32_t *skipped, unsigned n, uint32_t pid) {
@@ -970,11 +1167,16 @@ struct patch_bundle {
     struct patch_site pssr;
     struct patch_site hz[6];
     struct patch_site out[3];
-    struct patch_site pro_rt_half;
+    struct patch_site pro_rt_half[4];
     struct patch_site close_fix;
     struct patch_site pro_taa2u;
     struct patch_site low_shadows;
-    struct patch_site low_volumetric;
+    struct patch_site low_shadows2;
+    struct patch_site low_reflections;
+    struct patch_site low_vol[2];
+    struct patch_site lod_scale;
+    struct patch_site low_bvh;
+    struct patch_site motion_blur[2];
 };
 
 static int is_site_patched(uint32_t pid, uint64_t base, const struct patch_site *s) {
@@ -1039,9 +1241,17 @@ static void format_opt_flags(char *buf, size_t sz) {
     if (g_pro_taa2u)
         len += (size_t)snprintf(buf + len, sz - len, ", TAA2U");
     if (g_low_shadows)
-        len += (size_t)snprintf(buf + len, sz - len, ", LowShad");
+        len += (size_t)snprintf(buf + len, sz - len, ", LowShad%u", g_low_shadows);
+    if (g_low_reflections)
+        len += (size_t)snprintf(buf + len, sz - len, ", LowRefl");
     if (g_low_volumetric)
         len += (size_t)snprintf(buf + len, sz - len, ", LowVol");
+    if (g_lod_scale)
+        len += (size_t)snprintf(buf + len, sz - len, ", LOD %u%%", g_lod_scale);
+    if (g_low_bvh)
+        len += (size_t)snprintf(buf + len, sz - len, ", LowBVH");
+    if (!g_motion_blur)
+        len += (size_t)snprintf(buf + len, sz - len, ", NoMB");
     if (g_base_highres)
         len += (size_t)snprintf(buf + len, sz - len, ", BaseHR");
 }
@@ -1232,14 +1442,39 @@ static void build_patches(struct patch_bundle *b) {
         b->out[2].patch[5] = 0x90;
     }
 
-    /* PS5 Pro Half-Res RT Reflections (0x6326444, 3B: mov ecx, [rdi+0x54] -> xor ecx, ecx; nop): */
-    b->pro_rt_half.name = "pro_rt_half";
-    b->pro_rt_half.rva = PRO_RT_HALF_RVA;
-    b->pro_rt_half.len = PRO_RT_HALF_LEN;
-    b->pro_rt_half.ctx = PRO_RT_HALF_CTX;
-    b->pro_rt_half.patch[0] = 0x31;
-    b->pro_rt_half.patch[1] = 0xc9;
-    b->pro_rt_half.patch[2] = 0x90;
+    /* PS5 Pro GlobalIlluminationQuality (0xc6c) -> Tier 0 across all 4 readers: */
+    b->pro_rt_half[0].name = "pro_rt_half1";
+    b->pro_rt_half[0].rva = PRO_RT_HALF_RVA;
+    b->pro_rt_half[0].len = PRO_RT_HALF_LEN;
+    b->pro_rt_half[0].ctx = PRO_RT_HALF_CTX;
+    b->pro_rt_half[0].patch[0] = 0x31; /* xor ecx, ecx; nop */
+    b->pro_rt_half[0].patch[1] = 0xc9;
+    b->pro_rt_half[0].patch[2] = 0x90;
+
+    b->pro_rt_half[1].name = "pro_rt_half2";
+    b->pro_rt_half[1].rva = PRO_RT_HALF2_RVA;
+    b->pro_rt_half[1].len = PRO_RT_HALF2_LEN;
+    b->pro_rt_half[1].ctx = PRO_RT_HALF2_CTX;
+    b->pro_rt_half[1].patch[0] = 0x45; /* xor r15d, r15d; nop */
+    b->pro_rt_half[1].patch[1] = 0x31;
+    b->pro_rt_half[1].patch[2] = 0xff;
+    b->pro_rt_half[1].patch[3] = 0x90;
+
+    b->pro_rt_half[2].name = "pro_rt_half3";
+    b->pro_rt_half[2].rva = PRO_RT_HALF3_RVA;
+    b->pro_rt_half[2].len = PRO_RT_HALF3_LEN;
+    b->pro_rt_half[2].ctx = PRO_RT_HALF3_CTX;
+    b->pro_rt_half[2].patch[0] = 0x31; /* xor edi, edi; nop*4 */
+    b->pro_rt_half[2].patch[1] = 0xff;
+    memset(b->pro_rt_half[2].patch + 2, 0x90, 4);
+
+    b->pro_rt_half[3].name = "pro_rt_half4";
+    b->pro_rt_half[3].rva = PRO_RT_HALF4_RVA;
+    b->pro_rt_half[3].len = PRO_RT_HALF4_LEN;
+    b->pro_rt_half[3].ctx = PRO_RT_HALF4_CTX;
+    b->pro_rt_half[3].patch[0] = 0x31; /* xor edi, edi; nop*4 */
+    b->pro_rt_half[3].patch[1] = 0xff;
+    memset(b->pro_rt_half[3].patch + 2, 0x90, 4);
 
     /* Close-game CE-108255-1 fix (0x65742c0, 7B: lea rbx, [rbp-0x1ac] -> xor ebx, ebx; jmp 0x6574710): */
     b->close_fix.name = "close_fix";
@@ -1272,14 +1507,83 @@ static void build_patches(struct patch_bundle *b) {
     put32le(b->low_shadows.patch + 1, 1u);
     b->low_shadows.patch[5] = 0x90;
 
-    /* Low volumetric/reflection map (0x3f73f11, 7B: cmp [rbx+0xc88], 0 -> cmp eax, eax; nop*5 -> 128/7 mips): */
-    b->low_volumetric.name = "low_volumetric";
-    b->low_volumetric.rva = LOW_VOLUMETRIC_RVA;
-    b->low_volumetric.len = LOW_VOLUMETRIC_LEN;
-    b->low_volumetric.ctx = LOW_VOLUMETRIC_CTX;
-    b->low_volumetric.patch[0] = 0x39;
-    b->low_volumetric.patch[1] = 0xc0;
-    memset(b->low_volumetric.patch + 2, 0x90, 5);
+    /* Fast Soft Shadows for low_shadows=2 (0x3f74350, 6B: mov eax, [rax+0x568] -> xor eax, eax; nop*4 -> filter 2): */
+    b->low_shadows2.name = "low_shadows2";
+    b->low_shadows2.rva = LOW_SHADOWS2_RVA;
+    b->low_shadows2.len = LOW_SHADOWS2_LEN;
+    b->low_shadows2.ctx = LOW_SHADOWS2_CTX;
+    b->low_shadows2.patch[0] = 0x31;
+    b->low_shadows2.patch[1] = 0xc0;
+    memset(b->low_shadows2.patch + 2, 0x90, 4);
+
+    /* ReflectionQuality map 256 -> 128 (0x3f73f11, 7B: cmp [rbx+0xc88], 0 -> cmp eax, eax; nop*5): */
+    b->low_reflections.name = "low_reflections";
+    b->low_reflections.rva = LOW_REFLECTIONS_RVA;
+    b->low_reflections.len = LOW_REFLECTIONS_LEN;
+    b->low_reflections.ctx = LOW_REFLECTIONS_CTX;
+    b->low_reflections.patch[0] = 0x39;
+    b->low_reflections.patch[1] = 0xc0;
+    memset(b->low_reflections.patch + 2, 0x90, 5);
+
+    /* True Volumetrics (VolumetricsRaymarchQuality 0x3f741b9 & VolumetricsLightingQuality 0x3f741c5 -> Tier 0): */
+    b->low_vol[0].name = "low_vol_raymarch";
+    b->low_vol[0].rva = LOW_VOL1_RVA;
+    b->low_vol[0].len = LOW_VOL_LEN;
+    b->low_vol[0].ctx = LOW_VOL1_CTX;
+    b->low_vol[0].patch[0] = 0x31;
+    b->low_vol[0].patch[1] = 0xc0;
+    memset(b->low_vol[0].patch + 2, 0x90, 4);
+
+    b->low_vol[1].name = "low_vol_lighting";
+    b->low_vol[1].rva = LOW_VOL2_RVA;
+    b->low_vol[1].len = LOW_VOL_LEN;
+    b->low_vol[1].ctx = LOW_VOL2_CTX;
+    b->low_vol[1].patch[0] = 0x31;
+    b->low_vol[1].patch[1] = 0xc0;
+    memset(b->low_vol[1].patch + 2, 0x90, 4);
+
+    /* LodScale (0x3f73f47, 16B: mov eax, <f32>; vmovd xmm0, eax; mov [0xd796908], eax; nop): */
+    b->lod_scale.name = "lod_scale";
+    b->lod_scale.rva = LOD_SCALE_RVA;
+    b->lod_scale.len = LOD_SCALE_LEN;
+    b->lod_scale.ctx = LOD_SCALE_CTX;
+    if (g_lod_scale > 0) {
+        static const uint8_t tail[11] = {
+            0xc5,0xf9,0x6e,0xc0,             /* vmovd xmm0, eax           */
+            0x89,0x05,0xb2,0x29,0x82,0x09,   /* mov [rip+0x98229b2], eax  (0xd796908) */
+            0x90                             /* nop                       */
+        };
+        float lod_f = (float)g_lod_scale / 100.0f;
+        b->lod_scale.patch[0] = 0xb8;
+        put32le(b->lod_scale.patch + 1, float_bits(lod_f));
+        memcpy(b->lod_scale.patch + 5, tail, sizeof(tail));
+    }
+
+    /* BvhQuality -> Tier 0 (0x3f7444f, 6B: mov eax, [rbx+0xcbc] -> xor eax, eax; nop*4): */
+    b->low_bvh.name = "low_bvh";
+    b->low_bvh.rva = LOW_BVH_RVA;
+    b->low_bvh.len = LOW_BVH_LEN;
+    b->low_bvh.ctx = LOW_BVH_CTX;
+    b->low_bvh.patch[0] = 0x31;
+    b->low_bvh.patch[1] = 0xc0;
+    memset(b->low_bvh.patch + 2, 0x90, 4);
+
+    /* MotionBlur off (0x4067792 & 0x64bbf36, 6B each: mov al, [rax+0x528] -> xor al, al; nop*4): */
+    b->motion_blur[0].name = "motion_blur1";
+    b->motion_blur[0].rva = MOTION_BLUR1_RVA;
+    b->motion_blur[0].len = MOTION_BLUR_LEN;
+    b->motion_blur[0].ctx = MOTION_BLUR1_CTX;
+    b->motion_blur[0].patch[0] = 0x30;
+    b->motion_blur[0].patch[1] = 0xc0;
+    memset(b->motion_blur[0].patch + 2, 0x90, 4);
+
+    b->motion_blur[1].name = "motion_blur2";
+    b->motion_blur[1].rva = MOTION_BLUR2_RVA;
+    b->motion_blur[1].len = MOTION_BLUR_LEN;
+    b->motion_blur[1].ctx = MOTION_BLUR2_CTX;
+    b->motion_blur[1].patch[0] = 0x30;
+    b->motion_blur[1].patch[1] = 0xc0;
+    memset(b->motion_blur[1].patch + 2, 0x90, 4);
 }
 
 /* Raise the transient render heap and shrink the main pool by the same amount.
@@ -1390,13 +1694,17 @@ static int apply_highres_heap(uint32_t pid, uint64_t base) {
     return 1;
 }
 
-/* Experimental Base PS5 heap expansion (base_highres=1): raises Base PS5 transient render
- * heap 0x2d80 (728 MB) -> 0x3800 (896 MB, fits stock 0x4000 page array) and Base PS5 heap #2
- * (0x9d65728) by +256 MB, shrinking the shared main pool by the same total (+424 MB). */
+/* Experimental Base PS5 dynamic heap expansion (base_highres=1):
+ *   res_pct <= 75: transient 728 -> 896 MB (+168 MB), heap #2 2718 -> 2974 MB (+256 MB)
+ *   res_pct >  75: transient 728 -> 1024 MB (+296 MB), heap #2 2718 -> 3230 MB (+512 MB)
+ * Both fit the stock 0x4000 page pointer array without relocation, shrinking the shared
+ * main pool by the exact same total. */
 static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
     static const uint8_t heap_stock[9] = { 0x50,0x35,0x00,0x00, 0xbb,0x80,0x2d,0x00,0x00 };
     uint8_t cur[9], q[8], imm[4];
     uint64_t heap_now = 0, h2 = 0, extra, pool_new;
+    uint32_t target_pages = (g_res_pct > 75u) ? BASE_HEAP_PAGES_HI : BASE_HEAP_PAGES_MED;
+    uint64_t heap2_add = (g_res_pct > 75u) ? BASE_HEAP2_ADD_HI : BASE_HEAP2_ADD_MED;
     unsigned i;
 
     if (!g_base_highres)
@@ -1407,7 +1715,7 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
     if (heap_now) {
         logmsg("WARN", "base_highres: render heap already created (%llu pages): too late",
                (unsigned long long)heap_now);
-        return heap_now >= BASE_HEAP_PAGES_NEW;
+        return heap_now >= target_pages;
     }
     if (proc_read(pid, base + HEAP_PAGES_RVA, cur, 9) || memcmp(cur, heap_stock, 9)) {
         logmsg("WARN", "base_highres: heap size site does not match the supported build");
@@ -1431,7 +1739,7 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
         }
     }
 
-    extra = (uint64_t)(BASE_HEAP_PAGES_NEW - BASE_HEAP_PAGES_STOCK) * 0x10000u + BASE_HEAP2_ADD;
+    extra = (uint64_t)(target_pages - BASE_HEAP_PAGES_STOCK) * 0x10000u + heap2_add;
     pool_new = POOL_STOCK - ((extra + 0x1fffffu) & ~(uint64_t)0x1fffffu);
     /* Shrink pool first, grow heaps last so any partial failure stays safe. */
     for (i = 0; i < 10; i++) {
@@ -1442,21 +1750,21 @@ static int apply_base_highres_heap(uint32_t pid, uint64_t base) {
             return 0;
         }
     }
-    h2 = BASE_HEAP2_STOCK + BASE_HEAP2_ADD;
+    h2 = BASE_HEAP2_STOCK + heap2_add;
     memcpy(q, &h2, 8);
     if (proc_write(pid, base + BASE_HEAP2_RVA, q, 8) ||
         proc_read(pid, base + BASE_HEAP2_RVA, cur, 8) || memcmp(cur, q, 8)) {
         logmsg("WARN", "base_highres: base heap #2 write failed");
         return 0;
     }
-    put32le(imm, BASE_HEAP_PAGES_NEW);
+    put32le(imm, target_pages);
     if (proc_write(pid, base + BASE_HEAP_PAGES_RVA, imm, 4) ||
         proc_read(pid, base + BASE_HEAP_PAGES_RVA, cur, 4) || memcmp(cur, imm, 4)) {
         logmsg("WARN", "base_highres: base transient heap write failed");
         return 0;
     }
     logmsg("OK", "base_highres: transient %u -> %u MB, heap #2 %llu -> %llu MB, main pool %llu -> %llu MB",
-           BASE_HEAP_PAGES_STOCK / 16u, BASE_HEAP_PAGES_NEW / 16u,
+           BASE_HEAP_PAGES_STOCK / 16u, target_pages / 16u,
            (unsigned long long)(BASE_HEAP2_STOCK >> 20), (unsigned long long)(h2 >> 20),
            (unsigned long long)(POOL_STOCK >> 20), (unsigned long long)(pool_new >> 20));
     return 1;
@@ -1468,9 +1776,10 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     int already1 = 0, already2 = 0, already_ts = 0, already_ts2 = 0;
     int taa2u_applied = 0, taa2u_alr = 0;
     int hz_alr = 0, out_alr = 0, rt_half_alr = 0;
-    int close_alr = 0, pro_taa2u_alr = 0, low_shad_alr = 0, low_vol_alr = 0;
+    int close_alr = 0, pro_taa2u_alr = 0, low_shad_alr = 0, low_shad2_alr = 0;
+    int low_refl_alr = 0, low_vol_alr = 0, lod_alr = 0, low_bvh_alr = 0, mb_alr = 0;
     unsigned long found_ms = elapsed_ms();
-    char flags[128];
+    char flags[160];
     int match;
 
     logmsg("OK", "found %s pid %u%s, verifying eboot...", titleid, pid,
@@ -1541,15 +1850,10 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
     }
 
     if (g_pro_rt_half) {
-        if (verify_site(pid, base, &b->pro_rt_half) == 1) {
-            if (apply_site(pid, base, &b->pro_rt_half, &rt_half_alr))
-                logmsg("WARN", "Pro RT Half-Res write failed");
-        } else {
-            logmsg("WARN", "Pro RT Half-Res context mismatch");
-        }
+        apply_site_group(pid, base, b->pro_rt_half, 4, "pro_rt_half", &rt_half_alr);
     }
 
-    if (g_low_shadows) {
+    if (g_low_shadows >= 1) {
         if (verify_site(pid, base, &b->low_shadows) == 1) {
             if (apply_site(pid, base, &b->low_shadows, &low_shad_alr))
                 logmsg("WARN", "low_shadows write failed");
@@ -1558,13 +1862,48 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         }
     }
 
-    if (g_low_volumetric) {
-        if (verify_site(pid, base, &b->low_volumetric) == 1) {
-            if (apply_site(pid, base, &b->low_volumetric, &low_vol_alr))
-                logmsg("WARN", "low_volumetric write failed");
+    if (g_low_shadows >= 2) {
+        if (verify_site(pid, base, &b->low_shadows2) == 1) {
+            if (apply_site(pid, base, &b->low_shadows2, &low_shad2_alr))
+                logmsg("WARN", "low_shadows2 write failed");
         } else {
-            logmsg("WARN", "low_volumetric context mismatch");
+            logmsg("WARN", "low_shadows2 context mismatch");
         }
+    }
+
+    if (g_low_reflections) {
+        if (verify_site(pid, base, &b->low_reflections) == 1) {
+            if (apply_site(pid, base, &b->low_reflections, &low_refl_alr))
+                logmsg("WARN", "low_reflections write failed");
+        } else {
+            logmsg("WARN", "low_reflections context mismatch");
+        }
+    }
+
+    if (g_low_volumetric) {
+        apply_site_group(pid, base, b->low_vol, 2, "low_volumetric", &low_vol_alr);
+    }
+
+    if (g_lod_scale > 0) {
+        if (verify_site(pid, base, &b->lod_scale) == 1) {
+            if (apply_site(pid, base, &b->lod_scale, &lod_alr))
+                logmsg("WARN", "lod_scale write failed");
+        } else {
+            logmsg("WARN", "lod_scale context mismatch");
+        }
+    }
+
+    if (g_low_bvh) {
+        if (verify_site(pid, base, &b->low_bvh) == 1) {
+            if (apply_site(pid, base, &b->low_bvh, &low_bvh_alr))
+                logmsg("WARN", "low_bvh write failed");
+        } else {
+            logmsg("WARN", "low_bvh context mismatch");
+        }
+    }
+
+    if (!g_motion_blur) {
+        apply_site_group(pid, base, b->motion_blur, 2, "motion_blur", &mb_alr);
     }
 
     if (apply_site(pid, base, &b->fps[0], &already1) ||
@@ -1608,7 +1947,9 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
         (g_refresh_hz != 120 || hz_alr) && (!g_output_res || out_alr) &&
         (!g_pro_rt_half || rt_half_alr) && (!g_close_fix || close_alr) &&
         (!g_pro_taa2u || pro_taa2u_alr) && (!g_low_shadows || low_shad_alr) &&
-        (!g_low_volumetric || low_vol_alr)) {
+        (g_low_shadows < 2 || low_shad2_alr) && (!g_low_reflections || low_refl_alr) &&
+        (!g_low_volumetric || low_vol_alr) && (!g_lod_scale || lod_alr) &&
+        (!g_low_bvh || low_bvh_alr) && (g_motion_blur || mb_alr)) {
         notify("already active (Res %u%%%s).", g_res_pct, flags);
     } else if (taa2u_applied) {
         notify("FPS Unlocked, Res %u%%%s", g_res_pct, flags);
@@ -1622,7 +1963,8 @@ static int patch_gtavi_session(uint32_t pid, const char *titleid, int already_op
 static int need_early_freeze(void) {
     return g_heap_pages != 0 || g_base_highres != 0 || g_output_res != 0 ||
            g_pro_rt_half != 0 || g_pro_taa2u != 0 || g_low_shadows != 0 ||
-           g_low_volumetric != 0;
+           g_low_reflections != 0 || g_low_volumetric != 0 || g_lod_scale != 0 ||
+           g_low_bvh != 0 || g_motion_blur == 0;
 }
 
 int main(void) {
@@ -1633,7 +1975,7 @@ int main(void) {
     uint32_t patched_pid = 0;
     unsigned poll = 0, fails = 0;
     int first_session = 1;
-    char flags[128];
+    char flags[160];
 
     clock_gettime(CLOCK_MONOTONIC, &g_t0);
 #ifndef HOST_TEST
@@ -1646,10 +1988,10 @@ int main(void) {
     }
     log_open();
     load_settings();
-    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, refresh_hz=%u, output_res=%u, pro_rt_half=%u, pro_highres=%u, close_fix=%u, pro_taa2u=%u, low_shadows=%u, low_volumetric=%u, base_highres=%u, daemon=%u)",
-           TOOL_VERSION, g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_pro_rt_half,
-           g_pro_highres, g_close_fix, g_pro_taa2u, g_low_shadows, g_low_volumetric,
-           g_base_highres, g_daemon);
+    logmsg("INFO", "gtavi-unlockfps v%s started (fps=%u, res_pct=%u%%, hz=%u, out=%u, mb=%u, pro_hr=%u, pro_rt=%u, pro_taa=%u, shad=%u, refl=%u, vol=%u, lod=%u, bvh=%u, base_hr=%u, close=%u, daemon=%u)",
+           TOOL_VERSION, g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_motion_blur,
+           g_pro_highres, g_pro_rt_half, g_pro_taa2u, g_low_shadows, g_low_reflections,
+           g_low_volumetric, g_lod_scale, g_low_bvh, g_base_highres, g_close_fix, g_daemon);
 #ifndef HOST_TEST
     logmsg("INFO", "console firmware %x.%02x", kernel_get_fw_version() >> 24,
            (kernel_get_fw_version() >> 16) & 0xff);
@@ -1725,10 +2067,10 @@ int main(void) {
             if (!first_session) {
                 load_settings();
                 build_patches(&patches);
-                logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, refresh_hz=%u, output_res=%u, pro_rt_half=%u, pro_highres=%u, close_fix=%u, pro_taa2u=%u, low_shadows=%u, low_volumetric=%u, base_highres=%u, daemon=%u)",
-                       g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_pro_rt_half,
-                       g_pro_highres, g_close_fix, g_pro_taa2u, g_low_shadows, g_low_volumetric,
-                       g_base_highres, g_daemon);
+                logmsg("INFO", "reloaded settings for new launch (fps=%u, res_pct=%u%%, hz=%u, out=%u, mb=%u, pro_hr=%u, pro_rt=%u, pro_taa=%u, shad=%u, refl=%u, vol=%u, lod=%u, bvh=%u, base_hr=%u, close=%u, daemon=%u)",
+                       g_target_fps, g_res_pct, g_refresh_hz, g_output_res, g_motion_blur,
+                       g_pro_highres, g_pro_rt_half, g_pro_taa2u, g_low_shadows, g_low_reflections,
+                       g_low_volumetric, g_lod_scale, g_low_bvh, g_base_highres, g_close_fix, g_daemon);
             }
             /* Freeze GTAVI before boot-time heap/settings init; always resumed below. */
             freeze_req = need_early_freeze();
